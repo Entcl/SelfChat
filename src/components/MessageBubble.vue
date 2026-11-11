@@ -6,8 +6,9 @@ import { chat, deleteMessage, editMessage, regenerate, retry } from '../store/ch
 import { copyText, formatClock } from '../utils/format'
 import { toast } from '../store/toast'
 import { userAvatar, aiAvatar, aiName, setUserAvatar, setAiAvatar, setAiName } from '../store/user'
-// 👈 这里引入你的 batman.svg
 import defaultUserAvatar from '../assets/batman.svg'
+// 👈 引入 trumpIcon
+import trumpIcon from '../assets/trumpIcon.svg'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -59,8 +60,8 @@ function triggerUpload(isUserAvatar) {
 function handleFileChange(e, isUserAvatar) {
   const file = e.target.files[0]
   if (!file) return
-  if (file.size > 2 * 1024 * 1024) {
-    toast.error('图片太大，请上传 2MB 以内的图片')
+  if (file.size > 10 * 1024 * 1024) {
+    toast.error('图片太大，请上传 10MB 以内的图片')
     return
   }
   const reader = new FileReader()
@@ -144,13 +145,12 @@ const statsText = computed(() => {
     <div class="avatar" :class="isUser ? 'avatar-user' : 'avatar-ai'" @click="triggerUpload(isUser)" title="点击更换头像">
       <template v-if="isUser">
         <img v-if="userAvatar" :src="userAvatar" class="avatar-img" alt="我" />
-        <!-- 👈 用户默认头像换成 Batman -->
-        <img v-else :src="defaultUserAvatar" class="avatar-img" alt="默认用户头像" />
+        <img v-else :src="defaultUserAvatar" class="avatar-img" alt="默认头像" />
       </template>
       <template v-else>
-        <!-- 👈 大肥鱼保持不动 -->
         <img v-if="aiAvatar" :src="aiAvatar" class="avatar-img" alt="AI" />
-        <span v-else class="avatar-mark">鱼</span>
+        <!-- 👈 修改：替换默认的“鱼”字 -->
+        <img v-else :src="trumpIcon" class="avatar-img" alt="默认 AI 头像" />
       </template>
     </div>
 
@@ -227,6 +227,7 @@ const statsText = computed(() => {
 </template>
 
 <style scoped>
+/* 样式保持原样，完全不用变 */
 .msg-name.can-edit { cursor: pointer; transition: color 0.2s; }
 .msg-name.can-edit:hover { color: var(--accent-1); text-decoration: underline; }
 .name-input { font-size: 12px; font-weight: 620; color: var(--text-strong); background: var(--glass); border: 1px solid rgba(139, 92, 246, 0.5); border-radius: 4px; padding: 1px 6px; outline: none; width: 100px; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15); }

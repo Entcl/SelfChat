@@ -45,3 +45,5 @@ server/plugins_db.json
 server/temp_uploads/
 
 .vscode/
+
+release/

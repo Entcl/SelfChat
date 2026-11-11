@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
-import MarkdownBody from './MarkdownBody.vue' // 👈 引入 Markdown 渲染组件
+import MarkdownBody from './MarkdownBody.vue'
 import { chat, checkStatus, clearAll, activeSession, updateSessionConfig } from '../store/chat'
 import { askConfirm } from '../store/confirm'
 import { chatUrlPreview, resetSettings, settings, API_PRESETS } from '../store/settings'
@@ -11,7 +11,8 @@ import { toast } from '../store/toast'
 import { userAvatar, aiAvatar, aiName, setUserAvatar, setAiAvatar, setAiName } from '../store/user'
 import { exportAllSessions } from '../utils/export'
 import defaultUserAvatar from '../assets/batman.svg'
-import { plugins, fetchPlugins, uploadPlugin, togglePlugin } from '../store/plugins'
+import trumpIcon from '../assets/trumpIcon.svg'
+import { plugins, fetchPlugins, uploadPlugin, togglePlugin, removePlugin, renamePlugin } from '../store/plugins'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -23,6 +24,11 @@ const testResult = ref(null)
 const refreshing = ref(false)
 const showModelDropdown = ref(false)
 const isRefreshingPlugins = ref(false)
+
+// 👈 插件重命名状态
+const editingPluginId = ref(null)
+const editingPluginAlias = ref('')
+const pluginEditRef = ref(null)
 
 const fetchedModels = ref([])
 const isSessionOverride = computed(() => !!activeSession.value?.config)
@@ -73,17 +79,13 @@ async function silentFetchModels() {
 }
 
 const availableModels = computed(() => {
-  if (fetchedModels.value.length > 0) {
-    return fetchedModels.value 
-  }
+  if (fetchedModels.value.length > 0) return fetchedModels.value 
   const isCloud = currentConfig.value.protocol === 'openai'
   const currentUrl = currentConfig.value.baseUrl
-
   if (!isCloud) {
     const localPreset = API_PRESETS.find(p => p.label === '本地 Ollama')?.models || []
     return Array.from(new Set([...(settings.models || []), ...localPreset])).filter(Boolean)
   }
-
   const matchedPreset = API_PRESETS.find(p => p.value.baseUrl === currentUrl)
   return matchedPreset?.models || ['deepseek-flash', 'deepseek-v4-pro']
 })
@@ -91,27 +93,13 @@ const availableModels = computed(() => {
 function usePreset(preset) {
   if (!preset.value) return
   fetchedModels.value = []
-  
   let newKey = currentConfig.value.apiKey
-  if (preset.value.protocol === 'ollama') {
-    newKey = ''
-  } else if (currentConfig.value.baseUrl !== preset.value.baseUrl) {
-    newKey = ''
-  }
-
-  currentConfig.value = {
-    ...currentConfig.value,
-    protocol: preset.value.protocol,
-    baseUrl: preset.value.baseUrl,
-    model: preset.value.model,
-    apiKey: newKey
-  }
+  if (preset.value.protocol === 'ollama') newKey = ''
+  else if (currentConfig.value.baseUrl !== preset.value.baseUrl) newKey = ''
+  currentConfig.value = { ...currentConfig.value, protocol: preset.value.protocol, baseUrl: preset.value.baseUrl, model: preset.value.model, apiKey: newKey }
   toast.success(`已切换至: ${preset.label}`)
-
   if (preset.value.protocol === 'openai' && !newKey) {
-    setTimeout(() => {
-      toast.info('请在下方 API Key 输入框中填入你的密钥')
-    }, 300)
+    setTimeout(() => toast.info('请在下方 API Key 输入框中填入你的密钥'), 300)
   }
 }
 
@@ -121,26 +109,20 @@ function selectModel(name) {
 }
 
 function onModelInputBlur() {
-  setTimeout(() => {
-    showModelDropdown.value = false
-  }, 150)
+  setTimeout(() => { showModelDropdown.value = false }, 150)
 }
 
 watch(() => props.open, async (isOpen) => {
   if (isOpen) {
     fetchedModels.value = [] 
     await silentFetchModels()
-    
     if (!testing.value) {
-      checkStatus().then(res => {
-        if (res.ok && !chat.streaming) chat.status = 'online'
-      })
+      checkStatus().then(res => { if (res.ok && !chat.streaming) chat.status = 'online' })
     }
     fetchPlugins() 
   }
 })
 
-// 头像上传
 const userInput = ref(null)
 const aiInput = ref(null)
 
@@ -152,10 +134,7 @@ function triggerUpload(type) {
 function handleFileChange(e, type) {
   const file = e.target.files[0]
   if (!file) return
-  if (file.size > 10 * 1024 * 1024) {
-    toast.error('图片太大，请上传 10MB 以内的图片')
-    return
-  }
+  if (file.size > 10 * 1024 * 1024) return toast.error('图片太大，请上传 10MB 以内的图片')
   const reader = new FileReader()
   reader.onload = (event) => {
     if (type === 'user') setUserAvatar(event.target.result)
@@ -171,25 +150,35 @@ function resetAiAvatar() { setAiAvatar(''); toast.success('已恢复默认 AI �
 
 // ================= 插件相关 =================
 const pluginInput = ref(null)
-const openMenuId = ref(null)
-
-function toggleMenu(id) { openMenuId.value = openMenuId.value === id ? null : id }
-function onDocPointerDown(e) { if (openMenuId.value && !e.target.closest('.plugin-more-wrap')) openMenuId.value = null }
-onMounted(() => document.addEventListener('pointerdown', onDocPointerDown))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDown))
+const pluginFolderInput = ref(null)
 
 function triggerPluginUpload() { pluginInput.value?.click() }
+function triggerFolderUpload() { pluginFolderInput.value?.click() }
 
 async function handlePluginFile(e) {
   const file = e.target.files[0]
   if (!file) return
-  if (!file.name.endsWith('.js')) {
-    toast.error('请上传 .js 格式的插件')
+  if (!file.name.endsWith('.js')) return toast.error('请上传 .js 格式的插件')
+  try {
+    await uploadPlugin([file])
+    toast.success('插件已上传，请点击右侧开关启用！')
+  } catch (err) {
+    toast.error(err.message || '上传失败')
+  }
+  e.target.value = ''
+}
+
+async function handlePluginFolder(e) {
+  const files = Array.from(e.target.files)
+  if (!files.length) return
+  const hasMainJs = files.some(f => f.name === 'main.js' || f.name.endsWith('.js'))
+  if (!hasMainJs) {
+    toast.error('文件夹中必须包含 .js 插件主文件！')
     return
   }
   try {
-    await uploadPlugin(file)
-    toast.success('插件已上传，请点击右侧开关启用！')
+    await uploadPlugin(files)
+    toast.success('文件夹插件已上传，请点击右侧开关启用！')
   } catch (err) {
     toast.error(err.message || '上传失败')
   }
@@ -215,12 +204,66 @@ async function onTogglePlugin(plugin, e) {
   }
 }
 
-const readmeModal = ref({ show: false, title: '', content: '' })
-function openReadme(plugin) { 
-  readmeModal.value = { show: true, title: plugin.name, content: plugin.readme || '暂无文档' } 
+// 👈 插件重命名逻辑
+async function startRename(plugin) {
+  editingPluginId.value = plugin.id
+  editingPluginAlias.value = plugin.alias || plugin.name
+  await nextTick()
+  pluginEditRef.value?.focus()
+  pluginEditRef.value?.select()
 }
 
-// 基础设置逻辑
+async function commitRename(plugin) {
+  if (editingPluginId.value !== plugin.id) return
+  editingPluginId.value = null
+  const newAlias = editingPluginAlias.value.trim()
+  if (newAlias !== (plugin.alias || plugin.name)) {
+    try {
+      await renamePlugin(plugin.id, newAlias)
+      toast.success('插件备注已更新')
+      await fetchPlugins() // 重新排序
+    } catch (err) {
+      toast.error('修改失败')
+    }
+  }
+}
+
+function onRenameKeydown(e, plugin) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    commitRename(plugin)
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    editingPluginId.value = null
+  }
+}
+
+async function onDeletePlugin(plugin) {
+  const ok = await askConfirm({
+    title: '删除插件？',
+    message: `确定要永久删除「${plugin.alias || plugin.name}」吗？相关文件将被彻底移除。`,
+    confirmText: '删除',
+  })
+  if (!ok) return
+  
+  try {
+    await removePlugin(plugin.id)
+    toast.success('插件已删除')
+  } catch (err) {
+    toast.error('删除失败')
+  }
+}
+
+const readmeShow = ref(false)
+const readmeTitle = ref('')
+const readmeContent = ref('')
+
+function openReadme(plugin) { 
+  readmeTitle.value = plugin.alias || plugin.name
+  readmeContent.value = plugin.readme || '# 暂无文档\n该插件未提供 README.md 文件。'
+  readmeShow.value = true
+}
+
 const promptPresets = [
   { label: '简洁模式', value: '回答尽量简洁：先给结论，再补充必要细节，避免冗长铺垫。' },
   { label: '代码助手', value: '你是一名资深前端工程师。代码需可直接运行，关键逻辑加注释，并说明改动原因。' },
@@ -233,18 +276,13 @@ async function testConnection() {
   if (testing.value) return
   testing.value = true
   testResult.value = null
-  
   const startTime = Date.now()
   const result = await checkStatus(currentConfig.value)
-  
   const elapsed = Date.now() - startTime
   if (elapsed < 800) await new Promise(resolve => setTimeout(resolve, 800 - elapsed))
-
   testing.value = false
   if (result.ok) {
-    if (result.models && result.models.length > 0) {
-      fetchedModels.value = result.models
-    }
+    if (result.models && result.models.length > 0) fetchedModels.value = result.models
     testResult.value = { ok: true, text: `连接成功，发现 ${result.models?.length || 0} 个模型` }
     toast.success('连接成功')
   } else {
@@ -259,9 +297,7 @@ async function refreshModels() {
   const result = await checkStatus(currentConfig.value)
   refreshing.value = false
   if (result.ok) {
-    if (result.models && result.models.length > 0) {
-      fetchedModels.value = result.models
-    }
+    if (result.models && result.models.length > 0) fetchedModels.value = result.models
     toast.success(`已刷新，共 ${result.models.length} 个模型`)
   } else {
     toast.error(result.error?.message || '获取模型列表失败')
@@ -317,11 +353,9 @@ function onExportAll() {
 
         <div class="panel-body">
           <div v-show="activeTab === 'basic'" class="tab-content">
-            <!-- 资料 -->
+            <!-- 基础设置内容 ... 保持原样，为了节省篇幅省略中间部分 ... -->
             <section class="block">
-              <div class="block-head">
-                <h3><img :src="defaultUserAvatar" class="head-icon-img" alt="" /> 资料</h3>
-              </div>
+              <div class="block-head"><h3><img :src="defaultUserAvatar" class="head-icon-img" alt="" /> 资料</h3></div>
               <div class="profile-row">
                 <div class="avatar-setting">
                   <div class="avatar-preview">
@@ -337,7 +371,7 @@ function onExportAll() {
                 <div class="avatar-setting">
                   <div class="avatar-preview ai-avatar">
                     <img v-if="aiAvatar" :src="aiAvatar" alt="AI 头像" />
-                    <span v-else>鱼</span>
+                    <img v-else :src="trumpIcon" class="avatar-img" alt="默认 AI 头像" />
                   </div>
                   <div class="avatar-actions">
                     <input type="file" ref="aiInput" accept="image/*" style="display: none" @change="handleFileChange($event, 'ai')" />
@@ -352,7 +386,6 @@ function onExportAll() {
               </div>
             </section>
 
-            <!-- 模型服务 -->
             <section class="block">
               <div class="block-head">
                 <h3><AppIcon name="plug" :size="15" /> 模型服务</h3>
@@ -360,105 +393,52 @@ function onExportAll() {
                   {{ chat.status === 'offline' ? '未连接' : chat.status === 'online' ? '已连接' : '待检测' }}
                 </span>
               </div>
-
               <div v-if="isSessionOverride" class="info-banner">
                 <AppIcon name="info" :size="14" />
                 当前对话使用了独立模板，修改下方设置不会影响全局对话。
                 <button type="button" class="link-btn" @click="updateSessionConfig(activeSession.id, null)">恢复跟随全局</button>
               </div>
-              
               <div class="field">
                 <label class="field-label">快捷预设</label>
                 <div class="preset-row">
-                  <button 
-                    v-for="preset in API_PRESETS" 
-                    :key="preset.label" 
-                    type="button" 
-                    class="chip" 
-                    :title="preset.hint" 
-                    :class="{ 'is-current': currentConfig.baseUrl === preset.value.baseUrl && currentConfig.model === preset.value.model }" 
-                    @click="usePreset(preset)"
-                  >
+                  <button v-for="preset in API_PRESETS" :key="preset.label" type="button" class="chip" :title="preset.hint" :class="{ 'is-current': currentConfig.baseUrl === preset.value.baseUrl && currentConfig.model === preset.value.model }" @click="usePreset(preset)">
                     {{ preset.label }}
                   </button>
                 </div>
               </div>
-
               <div class="segmented">
-                <button 
-                  v-for="option in protocolOptions" 
-                  :key="option.value" 
-                  type="button" 
-                  :class="{ 'is-active': currentConfig.protocol === option.value }" 
-                  @click="setProtocol(option.value)"
-                >
-                  {{ option.label }}
-                </button>
+                <button v-for="option in protocolOptions" :key="option.value" type="button" :class="{ 'is-active': currentConfig.protocol === option.value }" @click="setProtocol(option.value)">{{ option.label }}</button>
               </div>
               <div class="field">
                 <label class="field-label">接口地址</label>
-                <input 
-                  :value="currentConfig.baseUrl" 
-                  @input="setBaseUrl" 
-                  class="input" 
-                  spellcheck="false" 
-                  placeholder="/api" 
-                />
+                <input :value="currentConfig.baseUrl" @input="setBaseUrl" class="input" spellcheck="false" placeholder="/api" />
                 <p class="hint">实际请求：<code>{{ chatUrlPreview(currentConfig) }}</code></p>
               </div>
               <div class="field">
                 <label class="field-label">API Key <span class="optional">可选</span></label>
                 <input :value="currentConfig.apiKey" @input="e => currentConfig = { ...currentConfig, apiKey: e.target.value }" class="input" type="password" placeholder="使用云端模型需填 Key" />
               </div>
-              
               <div class="field">
                 <label class="field-label">模型名称</label>
                 <div class="input-row">
                   <div class="input-with-dropdown">
-                    <input 
-                      :value="currentConfig.model" 
-                      @input="e => currentConfig = { ...currentConfig, model: e.target.value }"
-                      class="input" 
-                      spellcheck="false" 
-                      placeholder="输入或选择模型" 
-                      @focus="showModelDropdown = true"
-                      @blur="onModelInputBlur"
-                    />
-                    <button 
-                      type="button" 
-                      class="dropdown-toggle" 
-                      @mousedown.prevent="showModelDropdown = !showModelDropdown"
-                    >
-                      <AppIcon name="arrowDown" :size="14" />
-                    </button>
-                    
+                    <input :value="currentConfig.model" @input="e => currentConfig = { ...currentConfig, model: e.target.value }" class="input" spellcheck="false" placeholder="输入或选择模型" @focus="showModelDropdown = true" @blur="onModelInputBlur" />
+                    <button type="button" class="dropdown-toggle" @mousedown.prevent="showModelDropdown = !showModelDropdown"><AppIcon name="arrowDown" :size="14" /></button>
                     <Transition name="menu">
                       <div v-if="showModelDropdown && availableModels.length" class="model-dropdown">
-                        <button
-                          v-for="name in availableModels"
-                          :key="name"
-                          type="button"
-                          class="dropdown-item"
-                          @mousedown.prevent="selectModel(name)"
-                        >
-                          {{ name }}
-                        </button>
+                        <button v-for="name in availableModels" :key="name" type="button" class="dropdown-item" @mousedown.prevent="selectModel(name)">{{ name }}</button>
                       </div>
                     </Transition>
                   </div>
-                  <button type="button" class="btn btn-sm" :disabled="refreshing" @click="refreshModels">
-                    <AppIcon name="refresh" :size="13" :class="{ 'spin': refreshing }" /> 拉取
-                  </button>
+                  <button type="button" class="btn btn-sm" :disabled="refreshing" @click="refreshModels"><AppIcon name="refresh" :size="13" :class="{ 'spin': refreshing }" /> 拉取</button>
                 </div>
               </div>
-
               <div class="test-row">
                 <button type="button" class="btn btn-sm" :disabled="testing" @click="testConnection"><AppIcon name="zap" :size="13" /> {{ testing ? '检测中…' : '测试连接' }}</button>
                 <span v-if="testResult" class="test-result" :class="testResult.ok ? 'ok' : 'bad'">{{ testResult.text }}</span>
               </div>
             </section>
 
-            <!-- 生成参数 -->
             <section class="block">
               <div class="block-head"><h3><AppIcon name="cpu" :size="15" /> 生成参数</h3></div>
               <div class="field">
@@ -471,33 +451,17 @@ function onExportAll() {
               </div>
             </section>
 
-            <!-- 系统提示词 -->
             <section class="block">
               <div class="block-head">
                 <h3><AppIcon name="message" :size="15" /> 系统提示词</h3>
                 <button v-if="settings.systemPrompt" type="button" class="link-btn" @click="settings.systemPrompt = ''">清空</button>
               </div>
-              <textarea
-                v-model="settings.systemPrompt"
-                class="textarea"
-                rows="3"
-                placeholder="例如：你是一名严谨的技术助手，回答要先给结论。"
-              ></textarea>
+              <textarea v-model="settings.systemPrompt" class="textarea" rows="3" placeholder="例如：你是一名严谨的技术助手，回答要先给结论。"></textarea>
               <div class="preset-row">
-                <button
-                  v-for="preset in promptPresets"
-                  :key="preset.label"
-                  type="button"
-                  class="chip"
-                  :class="{ 'is-current': settings.systemPrompt === preset.value }"
-                  @click="applyPrompt(preset)"
-                >
-                  {{ preset.label }}
-                </button>
+                <button v-for="preset in promptPresets" :key="preset.label" type="button" class="chip" :class="{ 'is-current': settings.systemPrompt === preset.value }" @click="applyPrompt(preset)">{{ preset.label }}</button>
               </div>
             </section>
 
-            <!-- 外观 -->
             <section class="block">
               <div class="block-head"><h3><AppIcon name="sun" :size="15" /> 外观</h3></div>
               <div class="segmented">
@@ -505,7 +469,6 @@ function onExportAll() {
               </div>
             </section>
 
-            <!-- 数据 -->
             <section class="block">
               <div class="block-head"><h3><AppIcon name="briefcase" :size="15" /> 数据</h3></div>
               <div class="data-row">
@@ -516,7 +479,6 @@ function onExportAll() {
             <p class="version">大肥鱼 · AI 对话工作台 <span>v2.0</span></p>
           </div>
 
-          <!-- 插件管理 -->
           <div v-show="activeTab === 'plugins'" class="tab-content plugins-tab">
             <div class="plugins-header">
               <div style="display: flex; align-items: center; gap: 10px;">
@@ -525,8 +487,12 @@ function onExportAll() {
               </div>
               <div style="display: flex; gap: 6px;">
                 <input type="file" ref="pluginInput" accept=".js" style="display: none" @change="handlePluginFile" />
+                <input type="file" ref="pluginFolderInput" webkitdirectory directory multiple style="display: none" @change="handlePluginFolder" />
                 <button type="button" class="btn btn-sm" @click="triggerPluginUpload">
-                  <AppIcon name="plus" :size="13" /> 上传
+                  <AppIcon name="plus" :size="13" /> 单文件
+                </button>
+                <button type="button" class="btn btn-sm" @click="triggerFolderUpload">
+                  <AppIcon name="folder" :size="13" /> 文件夹
                 </button>
                 <button type="button" class="btn btn-sm" :disabled="isRefreshingPlugins" @click="handleRefreshPlugins">
                   <AppIcon name="refresh" :size="13" :class="{ 'spin': isRefreshingPlugins }" /> 刷新
@@ -535,7 +501,7 @@ function onExportAll() {
             </div>
 
             <div class="empty-plugins" style="padding-top: 10px; margin-bottom: 10px; border-bottom: 1px dashed var(--glass-border);">
-              <p style="font-size: 11px;">支持单文件上传，或放入 <code>server/plugins</code> 文件夹（支持子文件夹）后点击刷新。</p>
+              <p style="font-size: 11px;">支持单文件或整个文件夹上传，或放入 <code>server/plugins</code> 文件夹后点击刷新。</p>
             </div>
 
             <div class="plugin-list" v-if="plugins.length > 0">
@@ -544,7 +510,25 @@ function onExportAll() {
                   <div class="plugin-icon"><AppIcon name="zap" :size="24" style="color: #4f46e5" /></div>
                   <div class="plugin-info">
                     <div class="plugin-title-row">
-                      <span class="plugin-name" :title="plugin.name">{{ plugin.name }}</span>
+                      <!-- 👈 核心修改：点击名字直接重命名 -->
+                      <input
+                        v-if="editingPluginId === plugin.id"
+                        ref="pluginEditRef"
+                        v-model="editingPluginAlias"
+                        class="plugin-name-input"
+                        maxlength="20"
+                        @blur="commitRename(plugin)"
+                        @keydown="onRenameKeydown($event, plugin)"
+                      />
+                      <span 
+                        v-else 
+                        class="plugin-name" 
+                        :title="(plugin.alias || plugin.name) + ' (点击修改备注)'" 
+                        @click.stop="startRename(plugin)"
+                      >
+                        {{ plugin.alias || plugin.name }}
+                      </span>
+                      
                       <span class="plugin-ver">{{ plugin.version }}</span>
                       <span class="plugin-status" :class="{ 'is-off': !plugin.enabled }">
                         {{ plugin.enabled ? '已开启' : '已关闭' }}
@@ -559,7 +543,8 @@ function onExportAll() {
                 </div>
                 <div class="plugin-footer">
                   <div class="plugin-actions">
-                    <button class="act-btn" title="文档" @click="openReadme(plugin)"><AppIcon name="fileText" :size="14" /></button>
+                    <button class="act-btn" title="文档" @click.stop="openReadme(plugin)"><AppIcon name="fileText" :size="14" /></button>
+                    <button class="act-btn is-danger" title="删除插件" @click.stop="onDeletePlugin(plugin)"><AppIcon name="trash" :size="14" /></button>
                   </div>
                 </div>
               </div>
@@ -580,23 +565,33 @@ function onExportAll() {
     </div>
   </Transition>
 
-  <Transition name="fade">
-    <div v-if="readmeModal.show" class="readme-modal-mask" @mousedown.self="readmeModal.show = false">
-      <div class="readme-modal">
-        <header>
-          <h3>{{ readmeModal.title }} <span>README</span></h3>
-          <button class="icon-btn" @click="readmeModal.show = false"><AppIcon name="x" :size="18" /></button>
-        </header>
-        <!-- 👈 核心修改：使用 MarkdownBody 渲染 -->
-        <div class="readme-content">
-          <MarkdownBody :source="readmeModal.content" />
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="readmeShow" class="readme-modal-mask" @mousedown.self="readmeShow = false">
+        <div class="readme-modal">
+          <header>
+            <h3>{{ readmeTitle }} <span>README</span></h3>
+            <button class="icon-btn" @click="readmeShow = false"><AppIcon name="x" :size="18" /></button>
+          </header>
+          <div class="readme-content">
+            <MarkdownBody v-if="readmeContent" :source="readmeContent" />
+            <div v-else style="text-align: center; color: var(--faint); padding: 20px;">暂无文档内容</div>
+          </div>
         </div>
       </div>
-    </div>
-  </Transition>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
+/* 样式不变，新增了 .plugin-name-input 和 .plugin-name 的悬浮效果 */
+.readme-modal-mask { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: grid; place-items: center; }
+.readme-modal { width: min(600px, 90vw); max-height: 80vh; background: var(--panel-bg); border-radius: 16px; border: 1px solid var(--glass-border-strong); box-shadow: var(--shadow-2); display: flex; flex-direction: column; overflow: hidden; }
+.readme-modal header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--glass-border); }
+.readme-modal h3 { font-size: 15px; font-weight: 600; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
+.readme-modal h3 span { font-size: 10px; background: var(--glass-hover); padding: 2px 6px; border-radius: 4px; color: var(--muted); }
+.readme-content { padding: 20px; overflow-y: auto; font-size: 13px; color: var(--text); line-height: 1.6; }
+
 .settings-layer { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; background: var(--overlay); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
 .settings-panel { display: flex; flex-direction: column; width: min(480px, 100%); height: 100%; background: var(--panel-bg); border-left: 1px solid var(--glass-border-strong); box-shadow: var(--shadow-2); }
 .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 18px 14px; flex: none; border-bottom: 1px solid var(--glass-border); }
@@ -660,7 +655,12 @@ function onExportAll() {
 .plugin-icon { width: 42px; height: 42px; flex: none; border-radius: 12px; background: rgba(79, 70, 229, 0.1); display: grid; place-items: center; }
 .plugin-info { flex: 1; min-width: 0; }
 .plugin-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.plugin-name { font-size: 14px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+
+/* 👈 新增：插件名称悬浮与输入框 */
+.plugin-name { font-size: 14px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; cursor: pointer; transition: color 0.2s; }
+.plugin-name:hover { color: var(--accent-1); text-decoration: underline; }
+.plugin-name-input { font-size: 14px; font-weight: 600; color: var(--text-strong); background: var(--glass); border: 1px solid rgba(139, 92, 246, 0.5); border-radius: 4px; padding: 0 6px; outline: none; width: 120px; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15); }
+
 .plugin-ver { font-size: 11px; color: var(--faint); font-family: var(--font-mono); }
 .plugin-status { font-size: 10px; color: #34d399; background: rgba(52, 211, 153, 0.1); padding: 1px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px; }
 .plugin-status.is-off { color: #fb7185; background: rgba(251, 113, 133, 0.1); }
@@ -675,27 +675,14 @@ input:checked + .slider:before { transform: translateX(16px); }
 .plugin-actions { display: flex; gap: 6px; }
 .act-btn { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); transition: all 0.15s; }
 .act-btn:hover, .act-btn.active { color: var(--text-strong); background: var(--glass-hover); }
-.plugin-more-wrap { position: relative; }
-.dropdown-menu { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 50; width: 140px; padding: 6px; border-radius: 12px; background: var(--glass-strong); border: 1px solid var(--glass-border-strong); box-shadow: var(--shadow-2); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
-.menu-item { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); border-radius: 6px; text-align: left; }
-.menu-item:hover { background: var(--glass-hover); }
-.menu-item.is-danger { color: #f87171; }
-.menu-item.is-danger:hover { background: rgba(248, 113, 113, 0.1); }
-.menu-divider { height: 1px; background: var(--glass-border); margin: 4px 0; }
-.menu-enter-active, .menu-leave-active { transition: opacity 0.15s, transform 0.15s; }
-.menu-enter-from, .menu-leave-to { opacity: 0; transform: translateY(4px); }
-.readme-modal-mask { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); display: grid; place-items: center; }
-.readme-modal { width: min(600px, 90vw); max-height: 80vh; background: var(--panel-bg); border-radius: 16px; border: 1px solid var(--glass-border-strong); box-shadow: var(--shadow-2); display: flex; flex-direction: column; overflow: hidden; }
-.readme-modal header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--glass-border); }
-.readme-modal h3 { font-size: 15px; font-weight: 600; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
-.readme-modal h3 span { font-size: 10px; background: var(--glass-hover); padding: 2px 6px; border-radius: 4px; color: var(--muted); }
-.readme-content { padding: 20px; overflow-y: auto; font-size: 13px; color: var(--text); line-height: 1.6; }
-/* 移除原有的 pre 标签样式，因为现在由 MarkdownBody 接管 */
-.readme-content pre { white-space: pre-wrap; font-family: var(--font-mono); }
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
-.empty-plugins { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 0; color: var(--faint); font-size: 13px; }
+.act-btn.is-danger:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
 .info-banner { display: flex; align-items: center; gap: 8px; padding: 10px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 10px; font-size: 11.5px; color: var(--text); margin-bottom: 4px; }
 .info-banner .link-btn { color: var(--accent-1); text-decoration: underline; margin-left: auto; }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+.panel-enter-active, .panel-leave-active { transition: opacity 0.22s var(--ease); }
+.panel-enter-from, .panel-leave-to { opacity: 0; }
+.panel-enter-active .settings-panel, .panel-leave-active .settings-panel { transition: transform 0.28s var(--ease); }
+.panel-enter-from .settings-panel, .panel-leave-to .settings-panel { transform: translateX(100%); }
 @media (max-width: 560px) { .settings-panel { width: 100%; border-left: none; } }
 </style>
