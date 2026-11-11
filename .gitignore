@@ -1,0 +1,47 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-ssr
+*.local
+
+# 本地视觉验证产物
+.preview
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==========================================
+# 🔴 核心隐私与本地运行文件（绝对不能被提交）
+# ==========================================
+# 本地 SQLite 数据库（包含所有聊天记录、配置、API Key）
+server/data.sqlite
+server/*.sqlite
+server/*.db
+
+# 插件的开启/关闭状态记录
+server/plugins_config.json
+server/plugins_db.json
+
+# 临时上传文件夹
+server/temp_uploads/
+
+.vscode/
