@@ -111,9 +111,7 @@ function pruneSessions() {
   }
 }
 
-// 👈 核心修改：增加了 silent 参数和重复检测提示
 export function createSession({ greeting = false, activate = true, silent = false } = {}) {
-  // 查找是否已经存在一个空的“新对话”
   const existingEmpty = chat.sessions.find(
     (s) => (s.title === '新对话' || !s.title) && s.messages.length === 0
   )
@@ -121,7 +119,6 @@ export function createSession({ greeting = false, activate = true, silent = fals
   if (existingEmpty) {
     if (activate) {
       chat.activeId = existingEmpty.id
-      // 如果不是静默创建（即用户主动点击了新建），则弹出提示
       if (!silent) {
         toast.info('已有空的新对话，已为您切换')
       }
@@ -179,7 +176,6 @@ export function deleteSession(id) {
   chat.sessions.splice(index, 1)
   if (chat.activeId === id) {
     chat.activeId = chat.sessions[index]?.id ?? chat.sessions[index - 1]?.id ?? null
-    // 删除后如果没有对话了，静默补建一个
     if (!chat.activeId) createSession({ greeting: false, silent: true })
   }
   persistSoon()
@@ -224,7 +220,6 @@ export function clearAll() {
   if (chat.streaming) stop()
   chat.sessions = []
   chat.activeId = null
-  // 清空所有对话后，静默补建一个欢迎对话
   createSession({ greeting: true, silent: true })
 }
 
@@ -242,6 +237,31 @@ function buildPayload(session) {
 }
 
 async function runCompletion() {
+  // 👈 GitHub Pages 环境拦截：如果有人在前端预览版里发消息，直接假回复
+  if (window.location.hostname.includes('github.io')) {
+    const session = activeSession.value
+    if (!session || chat.streaming) return
+
+    chat.streaming = true
+    const mockId = uid()
+    session.messages.push({
+      id: mockId,
+      role: 'assistant',
+      content: '',
+      createdAt: Date.now(),
+      model: 'preview-mode',
+      streaming: true,
+    })
+    
+    const assistant = session.messages[session.messages.length - 1]
+    setTimeout(() => {
+      assistant.content = '🚧 抱歉，当前处于 GitHub Pages **纯前端预览模式**。\n\n由于没有连接本地的 Node.js 后端和 Ollama 模型，我无法给你真实的回复。\n\n如需完整对话体验，请将项目克隆到本地，并运行 `node server/index.js` 启动后端。'
+      assistant.streaming = false
+      chat.streaming = false
+    }, 800)
+    return
+  }
+
   const session = activeSession.value
   if (!session || chat.streaming) return
 
@@ -364,6 +384,11 @@ export async function editMessage(id, content) {
 }
 
 export async function checkStatus(customConfig) {
+  // 👈 GitHub Pages 环境拦截：不发起网络请求，直接返回离线
+  if (window.location.hostname.includes('github.io')) {
+    return { ok: false, error: new Error('预览环境不提供模型连接') }
+  }
+
   try {
     const models = await listModels(customConfig)
     if (!customConfig) {
@@ -378,13 +403,55 @@ export async function checkStatus(customConfig) {
 }
 
 export async function initChatStore() {
+  // 👈 GitHub Pages 环境拦截：注入首页假数据和对话
+  if (window.location.hostname.includes('github.io')) {
+    chat.sessions = [
+      {
+        id: 'mock-1',
+        title: '前端 UI 预览版',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        pinned: true,
+        config: null,
+        messages: [
+          {
+            id: 'm1',
+            role: 'user',
+            content: '你好，这个页面是怎么运行的？',
+            createdAt: Date.now() - 10000,
+          },
+          {
+            id: 'm2',
+            role: 'assistant',
+            content: '### 欢迎体验大肥鱼 🐟\n\n这是部署在 **GitHub Pages** 上的纯前端静态预览版。\n\n由于这里没有 Node.js 后端环境，也没有本地的大模型（如 Ollama），所以在此页面上发送消息不会收到真实的 AI 回复。\n\n不过你可以随意点开**设置面板**、切换**主题**、或者体验一下界面的**玻璃拟态动画**。\n\n> 想体验完整功能？请克隆项目到本地并运行 `node server/index.js` 启动后端！',
+            createdAt: Date.now(),
+          }
+        ]
+      },
+      {
+        id: 'mock-2',
+        title: '这是一个历史对话',
+        createdAt: Date.now() - 86400000,
+        updatedAt: Date.now() - 86400000,
+        pinned: false,
+        config: null,
+        messages: [
+          { id: 'm3', role: 'user', content: '测试一下侧边栏。', createdAt: Date.now() - 86400000 },
+          { id: 'm4', role: 'assistant', content: '侧边栏的样式非常完美！', createdAt: Date.now() - 86400000 }
+        ]
+      }
+    ]
+    chat.activeId = 'mock-1'
+    return
+  }
+
+  // 真实的本地环境加载逻辑
   const saved = await loadJSON(STORAGE_KEY, null)
   if (saved && Array.isArray(saved.sessions) && saved.sessions.length) {
     chat.sessions = saved.sessions.map(normalizeSession)
     const target = chat.sessions.find((session) => session.id === saved.activeId)
     chat.activeId = target ? target.id : chat.sessions[0].id
   } else {
-    // 初始启动时静默创建欢迎对话
     createSession({ greeting: true, silent: true })
   }
 }
