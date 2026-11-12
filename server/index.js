@@ -24,9 +24,9 @@ try {
   if (app) userDataDir = app.getPath('userData')
 } catch (e) {}
 
-const dbPath = path.join(userDataDir, 'data.sqlite')
+const dbPath = process.env.DB_PATH || path.join(userDataDir, 'data.sqlite')
 process.env.DB_PATH = dbPath
-const db = require('./db')
+const { getKV, setKV } = require('./db')
 
 const app = express()
 app.use(cors())
@@ -141,28 +141,47 @@ const storage = multer.memoryStorage()
 const upload = multer({ storage })
 
 app.get('/api/storage/:key', (req, res) => {
-  const row = db.prepare('SELECT value FROM kv_store WHERE key = ?').get(req.params.key)
-  res.json({ value: row ? row.value : null })
+  res.json({ value: getKV(req.params.key) })
 })
 
 app.post('/api/storage/:key', (req, res) => {
   const { key } = req.params
   const { value } = req.body
-  if (value === null || value === undefined) {
-    db.prepare('DELETE FROM kv_store WHERE key = ?').run(key)
-  } else {
-    db.prepare(`
-      INSERT INTO kv_store (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-    `).run(key, String(value))
+  try {
+    setKV(key, value)
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: `写入失败: ${err.message}` })
   }
-  res.json({ success: true })
 })
 
 app.get('/api/plugins', (req, res) => {
   const list = scanPlugins()
   res.json({ plugins: list, errors: pluginErrors })
 })
+
+/**
+ * 校验上传的相对路径：拒绝绝对路径、盘符、`..` 穿越与空字节。
+ * 返回规范化后的相对路径，非法时返回 null。
+ */
+function sanitizeUploadPath(rawPath) {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return null
+  if (rawPath.includes('\0')) return null
+
+  // 统一分隔符并去掉开头的 ./ 或 /
+  const normalized = rawPath.replace(/\\/g, '/').replace(/^\.?\//, '')
+  if (!normalized) return null
+
+  // 拒绝 Windows 盘符与 UNC 路径
+  if (/^[a-zA-Z]:/.test(normalized) || normalized.startsWith('//')) return null
+
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length === 0) return null
+  // 任何一段是 .. 都视为穿越
+  if (parts.some((seg) => seg === '..')) return null
+
+  return parts
+}
 
 app.post('/api/plugins/upload-multi', upload.any(), (req, res) => {
   try {
@@ -172,38 +191,60 @@ app.post('/api/plugins/upload-multi', upload.any(), (req, res) => {
     if (req.body.pathsJson) {
       try { paths = JSON.parse(req.body.pathsJson) } catch (e) {}
     }
+    if (!Array.isArray(paths)) paths = []
 
     if (req.files.length === 1 && paths.length <= 1) {
       const file = req.files[0]
       if (!file.originalname.endsWith('.js')) return res.status(400).json({ error: '必须是 .js 文件' })
-      fs.writeFileSync(path.join(PLUGINS_DIR, file.originalname), file.buffer)
+      // 单文件上传也只用 basename，避免 originalname 里夹带路径
+      const safeName = path.basename(file.originalname.replace(/\\/g, '/'))
+      if (!safeName || safeName === '.' || safeName === '..') {
+        return res.status(400).json({ error: '非法的文件名' })
+      }
+      fs.writeFileSync(path.join(PLUGINS_DIR, safeName), file.buffer)
+      scanPlugins()
       return res.json({ success: true })
     }
 
     if (paths.length === 0) return res.status(400).json({ error: '路径解析失败' })
-    
-    const firstPath = paths[0].replace(/\\/g, '/')
-    const folderName = firstPath.split('/')[0]
+
+    // 先整体校验所有路径，任一条非法就整体拒绝，避免写入部分文件
+    const sanitized = []
+    for (const p of paths) {
+      const segs = sanitizeUploadPath(p)
+      if (!segs) return res.status(400).json({ error: `非法的上传路径: ${String(p).slice(0, 120)}` })
+      sanitized.push(segs)
+    }
+
+    const folderName = sanitized[0][0]
+    if (!folderName || folderName === '.' || folderName === '..') {
+      return res.status(400).json({ error: '非法的插件目录名' })
+    }
     const targetFolder = path.join(PLUGINS_DIR, folderName)
-    
+    // 双保险：目标目录必须位于 PLUGINS_DIR 之内
+    if (!path.resolve(targetFolder).startsWith(path.resolve(PLUGINS_DIR) + path.sep)) {
+      return res.status(400).json({ error: '非法的插件目录名' })
+    }
+
     if (!fs.existsSync(targetFolder)) {
       fs.mkdirSync(targetFolder, { recursive: true })
     }
 
     req.files.forEach((file, index) => {
-      const relPath = paths[index].replace(/\\/g, '/')
-      const parts = relPath.split('/')
-      parts.shift()
-      const innerPath = parts.join(path.sep)
-      
+      const segs = sanitized[index] || sanitized[0]
+      const innerPath = segs.slice(1).join(path.sep)
+
       if (innerPath) {
         const dest = path.join(targetFolder, innerPath)
+        // 最终落盘路径仍需在 targetFolder 内
+        if (!path.resolve(dest).startsWith(path.resolve(targetFolder) + path.sep)) return
         const destDir = path.dirname(dest)
         if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
         fs.writeFileSync(dest, file.buffer)
       }
     })
 
+    scanPlugins()
     res.json({ success: true })
   } catch (err) {
     console.error('❌ 上传插件失败:', err)
@@ -239,31 +280,34 @@ app.post('/api/plugins/:id/rename', (req, res) => {
 
 app.delete('/api/plugins/:id', (req, res) => {
   const id = req.params.id
-  const index = installedPlugins.findIndex(x => x.id === id)
-  
-  if (index > -1) {
-    const p = installedPlugins[index]
-    try {
-      if (fs.existsSync(p.path)) {
-        const stat = fs.statSync(p.path)
-        if (id.endsWith('.js')) {
-          fs.unlinkSync(p.path)
-          const mdPath = p.path.replace('.js', '.md')
-          if (fs.existsSync(mdPath)) fs.unlinkSync(mdPath)
-        } else {
-          const folderPath = path.dirname(p.path)
-          fs.rmSync(folderPath, { recursive: true, force: true })
-        }
+  // 不依赖内存里的 installedPlugins：冷启动后未调用过 /api/plugins 时它仍是空数组。
+  // 这里重新扫描一次，保证删除操作总能定位到真实的磁盘路径。
+  const list = scanPlugins()
+  const target = list.find((x) => x.id === id)
+
+  if (!target) return res.status(404).json({ error: '未找到该插件' })
+
+  try {
+    if (id.endsWith('.js')) {
+      if (fs.existsSync(target.path)) fs.unlinkSync(target.path)
+      const mdPath = target.path.replace(/\.js$/, '.md')
+      if (fs.existsSync(mdPath)) fs.unlinkSync(mdPath)
+    } else {
+      // 文件夹插件：target.path 是入口文件，删除其所在目录
+      const folderPath = path.dirname(target.path)
+      // 安全兜底：只允许删除 PLUGINS_DIR 下的子目录
+      if (path.resolve(folderPath) === path.resolve(PLUGINS_DIR) || !path.resolve(folderPath).startsWith(path.resolve(PLUGINS_DIR) + path.sep)) {
+        return res.status(400).json({ error: '非法的插件路径' })
       }
-      installedPlugins.splice(index, 1)
-      delete pluginConfig[id]
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(pluginConfig, null, 2))
-      res.json({ success: true })
-    } catch (err) {
-      res.status(500).json({ error: `删除文件失败: ${err.message}` })
+      fs.rmSync(folderPath, { recursive: true, force: true })
     }
-  } else {
-    res.status(404).json({ error: '未找到该插件' })
+
+    delete pluginConfig[id]
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(pluginConfig, null, 2))
+    scanPlugins()
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: `删除文件失败: ${err.message}` })
   }
 })
 

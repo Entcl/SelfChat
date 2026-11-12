@@ -45,7 +45,7 @@ function formatTime(ts) {
   return `${date.getMonth() + 1}/${date.getDate()}`
 }
 
-watch(() => ui.searchFocusTrigger, async () => {
+watch(() => ui.searchFocus, async () => {
   await nextTick()
   searchRef.value?.focus()
 })

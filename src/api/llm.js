@@ -1,7 +1,7 @@
 /**
  * 模型接口适配层
  */
-import { apiUrl, settings } from '../store/settings'
+import { settings } from '../store/settings'
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, Number(value) || 0))
 

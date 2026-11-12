@@ -1,0 +1,66 @@
+name: Deploy preview to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 只允许本工作流写 Pages，其余只读
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个部署。Pages 部署若被中途取消可能留下锁死的 deployment，
+# 因此这里排队等待而不是取消（与 GitHub 官方 Pages 模板保持一致）。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # --ignore-scripts：前端构建不需要 Electron 二进制和 better-sqlite3 原生模块，
+      # 跳过安装脚本可以省掉约 100MB 下载和一次原生编译。
+      #
+      # 仓库 .npmrc 把 registry 指向 registry.npmmirror.com（国内镜像），
+      # 而 lockfile 里 453 条 resolved 也都钉在该镜像上。GitHub 的 runner 在境外，
+      # 直连该镜像较慢且偶发超时，因此这里改用官方 registry，并让 npm 重写
+      # resolved 的主机名（tarball 的 sha512 与来源无关，integrity 校验不受影响）。
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: always
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
