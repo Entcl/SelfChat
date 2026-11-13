@@ -2,19 +2,37 @@
 <html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#070810" />
+
+    <!-- PWA：可添加到主屏幕 -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="大肥鱼" />
+    <meta name="format-detection" content="telephone=no" />
+
     <meta
       name="description"
       content="大肥鱼 · 本地大模型对话工作台：多会话管理、Markdown 渲染、流式输出、主题切换。"
     />
     <title>大肥鱼 · AI 对话工作台</title>
     <script>
-      // 首屏前置主题，避免深浅色闪烁
+      // 首屏前置主题，避免深浅色闪烁。
+      // 主题的真身存在 SQLite 里，同步阶段读不到，所以 theme store 会把最近一次的
+      // 取值镜像到 localStorage 的 sc.theme.boot.v1 供这里同步读取。
+      // 这个镜像 key 不需要加工作区前缀：每个窗口有独立的 Chromium 分区
+      // （persist:window-w1 / w2 ...），localStorage 天然互不可见。
       ;(function () {
         try {
-          var mode = localStorage.getItem('sc.theme.v1') || 'dark'
+          var mode =
+            localStorage.getItem('sc.theme.boot.v1') ||
+            localStorage.getItem('sc.theme.v1') ||
+            'dark'
           var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches
           var dark = mode === 'dark' || (mode === 'system' && !prefersLight)
           document.documentElement.dataset.theme = dark ? 'dark' : 'light'

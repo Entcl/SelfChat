@@ -146,6 +146,8 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* 移动端：禁止整页橡皮筋回弹，滚动交给内部容器 */
+  overscroll-behavior: none;
 }
 
 button,
@@ -271,6 +273,63 @@ svg {
   color: #f87171;
   background: rgba(248, 113, 113, 0.12);
   border-color: rgba(248, 113, 113, 0.28);
+}
+
+/* ------------------------------------------------------------
+   弹窗/面板右上角的关闭按钮（X）
+   独立于 .icon-btn：原先 36×36 且紧贴面板边缘，点击热区偏小。
+   这里显式给到 32×32 的可视尺寸 + 8px 的负向外扩热区，
+   实际可点击范围约 48×48，符合触控最小目标尺寸。
+   position/z-index 保证悬浮态不被相邻元素压住。
+   ------------------------------------------------------------ */
+.dialog-close {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  padding: 0;
+  border-radius: 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.18s var(--ease), color 0.18s var(--ease),
+    border-color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+
+/* 负向外扩的热区：不改变视觉尺寸，只放大命中区域 */
+.dialog-close::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 14px;
+}
+
+.dialog-close:hover {
+  color: var(--text-strong);
+  background: var(--glass-hover);
+  border-color: var(--glass-border);
+}
+
+.dialog-close:active {
+  transform: scale(0.92);
+}
+
+.dialog-close:focus-visible {
+  outline: none;
+  color: var(--text-strong);
+  background: var(--glass-hover);
+  border-color: rgba(139, 92, 246, 0.55);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.18);
+}
+
+/* 浅色主题下弱化背景，避免按钮在白色面板上显得脏 */
+:root[data-theme='light'] .dialog-close:hover {
+  background: rgba(15, 23, 42, 0.06);
 }
 
 .btn {
@@ -851,3 +910,65 @@ button.chip:hover {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ============================================================
+   移动端 / 触摸设备适配
+   ============================================================ */
+
+/* iOS Safari：输入框字号小于 16px 会在聚焦时自动放大整个页面，
+   这是手机端最影响体验的问题。用 >=16px 彻底规避。
+   仅在触摸设备上生效，桌面端保持原本更紧凑的视觉。 */
+@media (hover: none) and (pointer: coarse) {
+  textarea,
+  input,
+  select,
+  .composer-input,
+  .search-input,
+  .rename-input {
+    font-size: 16px !important;
+  }
+}
+
+/* 安全区：刘海屏 / 手势条。使用 env() 并在不支持时回退到 0 */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .chat-panel {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* 触摸设备：把偏小的可点区域放大到接近 44px 的推荐尺寸 */
+@media (hover: none) and (pointer: coarse) {
+  .send-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .icon-btn,
+  .header-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* 触摸时禁用 hover 造成的"粘滞高亮" */
+  .session-item:hover,
+  .menu-item:hover,
+  .model-badge:hover {
+    background: inherit;
+  }
+}
+
+/* 横屏手机：压缩头部与输入区高度，给消息列表让出空间 */
+@media (max-height: 480px) and (orientation: landscape) {
+  :root {
+    --header-h: 52px;
+  }
+
+  .composer {
+    padding-bottom: 8px !important;
+  }
+
+  .composer-input {
+    max-height: 96px !important;
+  }
+}
+

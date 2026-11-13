@@ -6,6 +6,32 @@ const path = require('path')
 const axios = require('axios')
 const Module = require('module')
 
+// ============================================================
+// 网络代理（对应设置面板「网络代理」字段）
+// https 目标经 HttpsProxyAgent 走用户配置的代理（国内访问海外 API 场景）；
+// http:// 本地服务（如 Ollama）始终直连，不走代理。
+// 依赖缺失时安全降级为直连并打印告警，不影响原有链路。
+// ============================================================
+let HttpsProxyAgent = null
+try {
+  HttpsProxyAgent = require('https-proxy-agent').HttpsProxyAgent
+} catch (e) {}
+
+function buildProxyAgent(proxyUrl, targetUrl) {
+  const raw = String(proxyUrl || '').trim()
+  if (!raw || !/^https?:\/\//i.test(raw)) return null
+  if (!HttpsProxyAgent) {
+    console.warn('[Proxy] 已配置代理但缺少 https-proxy-agent 依赖，本次请求降级为直连')
+    return null
+  }
+  try {
+    if (new URL(targetUrl).protocol !== 'https:') return null
+    return new HttpsProxyAgent(raw)
+  } catch {
+    return null
+  }
+}
+
 const originalResolveFilename = Module._resolveFilename
 Module._resolveFilename = function (request, parent, isMain, options) {
   try {
@@ -27,11 +53,18 @@ try {
 const dbPath = process.env.DB_PATH || path.join(userDataDir, 'data.sqlite')
 process.env.DB_PATH = dbPath
 const { getKV, setKV } = require('./db')
+// 本地 Python 微服务转发路由（POST /api/local-python/search）
+const { createLocalPythonRouter } = require('./routes/local-python')
+// EXE 插件扫描：与 JS 插件分流，避免两类产物混在同一个列表里
+const { isExePluginEntry, isStandaloneExeFile, scanExePlugins } = require('./routes/exe-plugins')
 
 const app = express()
 app.use(cors())
 app.use(express.json({ limit: '50mb' })) 
 app.use(express.static(path.join(__dirname, '../dist')))
+
+// 必须在 express.json() 之后挂载，否则 req.body 是 undefined
+app.use('/api/local-python', createLocalPythonRouter())
 
 const PLUGINS_DIR = path.join(userDataDir, 'plugins')
 if (!fs.existsSync(PLUGINS_DIR)) fs.mkdirSync(PLUGINS_DIR, { recursive: true })
@@ -58,6 +91,93 @@ if (fs.existsSync(CONFIG_FILE)) {
 let installedPlugins = []
 let pluginErrors = []
 
+/**
+ * 计算「插件身份」用于去重。
+ *
+ * 历史包袱：同一插件在 userData 里会留下多份（改名前 / 改名后的目录）。
+ * index.js 启动时只做「目标不存在才复制」，从不删旧文件，
+ * 所以旧目录会一直堆着，扫描时看起来就像装了多份。
+ *
+ * 身份优先级（任一命中即视为同一插件）：
+ *   1. 插件自己声明的 info.name —— 最可靠，跨目录名变化
+ *   2. 目录名归一化后相同 —— 剥离 plugins_ / plugin_ 前缀、去掉非字母数字，
+ *      于是 compound_search 和 plugins_compound_search 会归到同一个 key
+ */
+function normalizePluginId(rawId) {
+  return String(rawId || '')
+    .toLowerCase()
+    .replace(/\.js$/, '')
+    // 剥离常见的目录名前缀：plugins_compound_search → compound_search
+    .replace(/^plugins?[_-]/, '')
+    // 去掉分隔符，让 compound_search / compoundsearch / compound-search 等价
+    .replace(/[^a-z0-9]/g, '')
+}
+
+/**
+ * 返回插件的全部身份候选。
+ * 只要两个插件的候选集合有交集，就认为它们是同一个插件。
+ */
+function jsPluginIdentityKeys(item) {
+  const keys = new Set()
+
+  const declared = String(item.declaredName || '').trim()
+  if (declared) keys.add(`name:${declared.toLowerCase()}`)
+
+  const norm = normalizePluginId(item.id)
+  if (norm) keys.add(`id:${norm}`)
+
+  return keys
+}
+
+/**
+ * 对一组插件按身份去重。
+ *
+ * @param {Array<object>} list
+ * @param {Set<string>} preferredIds 内置目录（server/plugins）里存在的名字集合。
+ *        同一个插件有多份时，优先保留「随应用一起发布的那份」，
+ *        这样 userData 里的历史残留不会盖住当前正确版本。
+ */
+function dedupePlugins(list, preferredIds) {
+  /** @type {Array<{item: object, keys: Set<string>}>} 已保留的条目 */
+  const kept = []
+
+  // 先按「是否内置」排序：内置的优先参与匹配，从而占位胜出
+  const ordered = [...list].sort((a, b) => {
+    const pa = preferredIds.has(a.id) ? 0 : 1
+    const pb = preferredIds.has(b.id) ? 0 : 1
+    if (pa !== pb) return pa - pb
+    // 同级别时，名字短的优先（compound_search 比 plugins_compound_search 更「原本」）
+    return String(a.id).length - String(b.id).length
+  })
+
+  for (const item of ordered) {
+    const keys = jsPluginIdentityKeys(item)
+    if (keys.size === 0) continue
+
+    // 与已保留条目有任意一个身份重叠 → 视为重复，丢弃
+    const dup = kept.some((k) => [...keys].some((key) => k.keys.has(key)))
+    if (dup) continue
+
+    kept.push({ item, keys })
+  }
+
+  return kept.map((k) => k.item)
+}
+
+/** 内置插件目录里有哪些顶层名字（用于判定「哪份是随应用发布的」） */
+function listBuiltinPluginNames() {
+  const names = new Set()
+  try {
+    for (const f of fs.readdirSync(builtinPluginsDir)) {
+      if (f.startsWith('.')) continue
+      names.add(f)
+    }
+  } catch {
+    // 目录不存在（打包后可能被裁掉），返回空集合即可
+  }
+  return names
+}
+
 function scanPlugins() {
   pluginErrors = [] 
   const files = fs.readdirSync(PLUGINS_DIR)
@@ -65,6 +185,15 @@ function scanPlugins() {
 
   for (const file of files) {
     if (file.startsWith('.')) continue 
+
+    // 👈 EXE 插件与 JS 插件形态完全不同，先在入口处分流，
+    // 避免 adshield_exe 这类目录混进「普通插件」列表。
+    const verdict = isExePluginEntry(PLUGINS_DIR, file)
+    if (verdict.isExe) continue
+
+    // 孤立的 .exe 文件（单文件版残留）既不是 JS 插件也不是 EXE 插件，直接跳过
+    if (isStandaloneExeFile(PLUGINS_DIR, file)) continue
+
     const fullPath = path.join(PLUGINS_DIR, file)
     const stat = fs.statSync(fullPath)
 
@@ -99,6 +228,7 @@ function scanPlugins() {
         list.push({
           id: file, 
           name: file, // 物理名
+          declaredName: info.name || '', // 👈 插件自己声明的名字，用于跨目录名去重
           alias: currentConfig.alias, // 👈 别名
           version: info.version || '1.0.0',
           desc: info.desc || '文件夹插件', readme: readmeText,
@@ -120,7 +250,9 @@ function scanPlugins() {
         }
 
         list.push({
-          id: file, name: file.replace('.js', ''), alias: currentConfig.alias, 
+          id: file, name: file.replace('.js', ''),
+          declaredName: info.name || '',
+          alias: currentConfig.alias, 
           version: info.version || '1.0.0',
           desc: info.desc || '单文件插件', readme: readmeText,
           enabled: currentConfig.enabled, path: fullPath
@@ -131,7 +263,14 @@ function scanPlugins() {
       }
     }
   }
-  installedPlugins = list.sort((a, b) => (a.alias || a.name).localeCompare(b.alias || b.name))
+
+  // 👈 强制去重：同一插件在 userData 里可能有多份历史残留，
+  // 只保留「随应用发布的那份」，其余丢弃。
+  const deduped = dedupePlugins(list, listBuiltinPluginNames())
+
+  installedPlugins = deduped
+    .map(({ declaredName, ...rest }) => rest) // declaredName 只用于去重，不外泄
+    .sort((a, b) => (a.alias || a.name).localeCompare(b.alias || b.name))
   return installedPlugins
 }
 
@@ -158,6 +297,52 @@ app.post('/api/storage/:key', (req, res) => {
 app.get('/api/plugins', (req, res) => {
   const list = scanPlugins()
   res.json({ plugins: list, errors: pluginErrors })
+})
+
+/**
+ * EXE 插件清单。
+ * 独立数据源：只返回「含 .exe 或 _internal 的目录 / .exe 文件」，与 JS 插件完全隔离。
+ * 扫描顺序与 local-python 路由的 resolveExe 一致：userData 优先，内置目录兜底。
+ */
+app.get('/api/plugins/exe', (req, res) => {
+  try {
+    const list = scanExePlugins([PLUGINS_DIR, builtinPluginsDir], pluginConfig)
+    res.json({ plugins: list, errors: [] })
+  } catch (err) {
+    console.error('[EXE 插件扫描失败]', err)
+    res.status(500).json({ error: `EXE 插件扫描失败: ${err.message}`, plugins: [] })
+  }
+})
+
+/**
+ * 启用/禁用单个 EXE 插件。
+ * 写入 plugins_config.json；AdShield 面板会据此决定是否允许打开控制台。
+ */
+app.post('/api/plugins/exe/:id/toggle', (req, res) => {
+  const id = String(req.params.id || '')
+  const { enabled } = req.body || {}
+
+  // 只允许操作真实存在的 EXE 插件，防止用 id 穿越到其它目录
+  const all = scanExePlugins([PLUGINS_DIR, builtinPluginsDir], pluginConfig)
+  const target = all.find((p) => p.id.toLowerCase() === id.toLowerCase())
+  if (!target) {
+    return res.status(404).json({ error: 'EXE 插件不存在' })
+  }
+
+  const prev = pluginConfig[id]
+  const next =
+    typeof prev === 'object' && prev !== null
+      ? { ...prev, enabled: Boolean(enabled) }
+      : { enabled: Boolean(enabled), alias: '' }
+
+  pluginConfig[id] = next
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(pluginConfig, null, 2), 'utf-8')
+  } catch (err) {
+    return res.status(500).json({ error: `配置写入失败: ${err.message}` })
+  }
+
+  res.json({ success: true, id, enabled: Boolean(enabled) })
 })
 
 /**
@@ -321,7 +506,7 @@ app.get(['/api/tags', '/api/api/tags', '/api/v1/models'], async (req, res) => {
 })
 
 app.post('/api/plugin-chat', async (req, res) => {
-  let { messages, targetUrl, targetHeaders, ...restPayload } = req.body
+  let { messages, targetUrl, targetHeaders, proxyUrl, ...restPayload } = req.body
   let directReply = null
 
   for (const p of installedPlugins) {
@@ -352,8 +537,17 @@ app.post('/api/plugin-chat', async (req, res) => {
   }
 
   if (directReply) {
+    const isOpenAI = targetUrl && targetUrl.includes('/v1/chat/completions')
+    // 非流式（设置里关闭了流式输出）：直接回完整 JSON，渲染端按 message.content 解析
+    if (restPayload.stream === false) {
+      if (isOpenAI) {
+        res.json({ choices: [{ message: { role: 'assistant', content: directReply } }], usage: { completion_tokens: 1 } })
+      } else {
+        res.json({ message: { role: 'assistant', content: directReply }, done: true, eval_count: 1, eval_duration: 100000000 })
+      }
+      return
+    }
     res.setHeader('Content-Type', 'text/event-stream')
-    let isOpenAI = targetUrl && targetUrl.includes('/v1/chat/completions')
     if (isOpenAI) {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: directReply } }] })}\n\n`)
       res.write(`data: [DONE]\n\n`)
@@ -371,10 +565,13 @@ app.post('/api/plugin-chat', async (req, res) => {
   }
 
   try {
+    // 👇 配置了代理且目标是 https 时，经 HttpsProxyAgent 转发（http 目标由 buildProxyAgent 返回 null，保持直连）
+    const proxyAgent = buildProxyAgent(proxyUrl, finalTargetUrl)
     const response = await axios({
       method: 'post', url: finalTargetUrl, headers: targetHeaders,
       data: { ...restPayload, messages }, responseType: 'stream',
-      validateStatus: () => true 
+      validateStatus: () => true,
+      ...(proxyAgent ? { httpsAgent: proxyAgent } : {}),
     })
     if (response.status >= 400) {
       let errorMsg = `目标接口报错 HTTP ${response.status}`
@@ -390,6 +587,60 @@ app.post('/api/plugin-chat', async (req, res) => {
     response.data.pipe(res)
   } catch (error) {
     res.status(500).json({ error: `连接失败: ${error.message}` })
+  }
+})
+
+// ============================================================
+// 通用模型列表代理
+// 手机/远程设备访问时，前端无法直连 127.0.0.1 的 Ollama 或内网模型服务，
+// 因此由后端代为请求。targetUrl 必须显式给出，且做基础 SSRF 防护。
+// ============================================================
+app.post('/api/models', async (req, res) => {
+  const { targetUrl, targetHeaders, proxyUrl } = req.body || {}
+
+  if (typeof targetUrl !== 'string' || !targetUrl.trim()) {
+    return res.status(400).json({ error: '缺少 targetUrl' })
+  }
+
+  let parsed
+  try {
+    parsed = new URL(targetUrl)
+  } catch {
+    return res.status(400).json({ error: 'targetUrl 不是合法 URL' })
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return res.status(400).json({ error: '仅支持 http/https' })
+  }
+
+  // 只允许本机或内网地址直连代理（公网模型服务前端可直连，无需代理）；
+  // 配置了代理时额外放行 https 公网地址 —— 由代理转发，用于访问海外 API
+  const host = parsed.hostname
+  const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
+  const isPrivate =
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host)
+  const hasProxy = typeof proxyUrl === 'string' && /^https?:\/\//i.test(proxyUrl.trim())
+  if (!isLoopback && !isPrivate && !(hasProxy && parsed.protocol === 'https:')) {
+    return res.status(400).json({ error: '代理仅限本机或内网地址（公网 https 地址需先配置网络代理）' })
+  }
+
+  try {
+    const proxyAgent = hasProxy ? buildProxyAgent(proxyUrl, targetUrl) : null
+    const response = await axios.get(targetUrl, {
+      headers: targetHeaders || {},
+      timeout: 15000,
+      validateStatus: () => true,
+      ...(proxyAgent ? { httpsAgent: proxyAgent } : {}),
+    })
+    if (response.status >= 400) {
+      return res.status(response.status).json({ error: `模型服务返回 HTTP ${response.status}` })
+    }
+    res.json(response.data)
+  } catch (error) {
+    res.status(502).json({ error: `连接失败: ${error.message}` })
   }
 })
 

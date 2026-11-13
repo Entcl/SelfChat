@@ -1,5 +1,8 @@
 {
   "name": "selfchat-server",
   "version": "1.0.0",
-  "type": "commonjs"
+  "type": "commonjs",
+  "dependencies": {
+    "https-proxy-agent": "^5.0.1"
+  }
 }

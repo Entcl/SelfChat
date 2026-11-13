@@ -5,10 +5,10 @@ import MarkdownBody from './MarkdownBody.vue'
 import { chat, deleteMessage, editMessage, regenerate, retry } from '../store/chat'
 import { copyText, formatClock } from '../utils/format'
 import { toast } from '../store/toast'
-import { userAvatar, aiAvatar, aiName, setUserAvatar, setAiAvatar, setAiName } from '../store/user'
+import { userAvatar, aiName, currentProviderType, updateName, setUserAvatar } from '../store/user'
 import defaultUserAvatar from '../assets/batman.svg'
-// 👈 引入 trumpIcon
-import trumpIcon from '../assets/trumpIcon.svg'
+import AiAvatar from './AiAvatar.vue'
+import { fileToAvatarDataUrl, AvatarError } from '../utils/image'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -26,7 +26,6 @@ const draft = ref('')
 const editRef = ref(null)
 
 const userInput = ref(null)
-const aiInput = ref(null)
 
 const editingName = ref(false)
 const nameDraft = ref('')
@@ -47,31 +46,29 @@ function saveName() {
   editingName.value = false
   const val = nameDraft.value.trim()
   if (val && val !== aiName.value) {
-    setAiName(val)
+    // 显式带上 provider，避免「改名瞬间刚好切了会话」导致写错角色
+    updateName(currentProviderType.value, val)
     toast.success('称呼已更新')
   }
 }
 
-function triggerUpload(isUserAvatar) {
-  if (isUserAvatar) userInput.value?.click()
-  else aiInput.value?.click()
+function triggerUpload() {
+  userInput.value?.click()
 }
 
-function handleFileChange(e, isUserAvatar) {
-  const file = e.target.files[0]
-  if (!file) return
-  if (file.size > 10 * 1024 * 1024) {
-    toast.error('图片太大，请上传 10MB 以内的图片')
-    return
-  }
-  const reader = new FileReader()
-  reader.onload = (event) => {
-    if (isUserAvatar) setUserAvatar(event.target.result)
-    else setAiAvatar(event.target.result)
-    toast.success('头像已更新')
-  }
-  reader.readAsDataURL(file)
+async function handleFileChange(e) {
+  const file = e.target.files?.[0]
+  // 先清空，否则连续选同一张图不会再触发 change
   e.target.value = ''
+  if (!file) return
+  try {
+    // 与 AI 头像共用同一套压缩管线，避免把几 MB 原图写进 profile blob
+    const { dataUrl } = await fileToAvatarDataUrl(file)
+    setUserAvatar(dataUrl)
+    toast.success('头像已更新')
+  } catch (err) {
+    toast.error(err instanceof AvatarError ? err.message : '头像处理失败，请换一张试试')
+  }
 }
 
 async function copyMessage() {
@@ -139,20 +136,21 @@ const statsText = computed(() => {
 
 <template>
   <article class="msg" :class="[isUser ? 'is-user' : 'is-ai', { 'is-error': message.error }]">
-    <input type="file" ref="userInput" accept="image/*" style="display: none" @change="handleFileChange($event, true)" />
-    <input type="file" ref="aiInput" accept="image/*" style="display: none" @change="handleFileChange($event, false)" />
+    <input type="file" ref="userInput" accept="image/png, image/jpeg" style="display: none" @change="handleFileChange" />
 
-    <div class="avatar" :class="isUser ? 'avatar-user' : 'avatar-ai'" @click="triggerUpload(isUser)" title="点击更换头像">
-      <template v-if="isUser">
-        <img v-if="userAvatar" :src="userAvatar" class="avatar-img" alt="我" />
-        <img v-else :src="defaultUserAvatar" class="avatar-img" alt="默认头像" />
-      </template>
-      <template v-else>
-        <img v-if="aiAvatar" :src="aiAvatar" class="avatar-img" alt="AI" />
-        <!-- 👈 修改：替换默认的“鱼”字 -->
-        <img v-else :src="trumpIcon" class="avatar-img" alt="默认 AI 头像" />
-      </template>
+    <div
+      v-if="isUser"
+      class="avatar avatar-user"
+      @click="triggerUpload"
+      title="点击更换头像"
+    >
+      <img v-if="userAvatar" :src="userAvatar" class="avatar-img" alt="我" />
+      <img v-else :src="defaultUserAvatar" class="avatar-img" alt="默认头像" />
     </div>
+
+    <!-- AI 头像统一走 AiAvatar：与左上角、侧边栏共用同一份 store 状态。
+         气泡里不开放点击改头像（避免滚动时误触），只做展示。 -->
+    <AiAvatar v-else size="bubble" />
 
     <div class="msg-main">
       <header class="msg-meta">
@@ -235,7 +233,6 @@ const statsText = computed(() => {
 .avatar { display: grid; place-items: center; width: 34px; height: 34px; margin-top: 22px; flex: none; border-radius: 12px; font-size: 12.5px; font-weight: 650; color: #fff; border: 1px solid var(--glass-border); box-shadow: var(--shadow-1); overflow: hidden; cursor: pointer; transition: opacity 0.2s; }
 .avatar:hover { opacity: 0.8; }
 .avatar-user { background: #fff; }
-.avatar-ai { background: var(--accent-grad); }
 .avatar-mark { font-size: 15px; font-weight: 700; line-height: 1; color: #fff; }
 .msg { display: flex; gap: 12px; width: 100%; max-width: 860px; margin: 0 auto; padding: 6px 0; animation: fade-up 0.32s var(--ease) both; }
 .msg.is-user { flex-direction: row-reverse; }

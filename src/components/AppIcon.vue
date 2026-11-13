@@ -90,6 +90,15 @@ const ICONS = {
   ],
   panelLeft: ['M3 4h18v16H3z', 'M9 4v16'],
   briefcase: ['M3 8h18v11H3z', 'M9 8V5h6v3', 'M3 12h18'],
+  shield: ['M12 3 4.5 6v6.2c0 4.3 3.1 7.5 7.5 8.8 4.4-1.3 7.5-4.5 7.5-8.8V6L12 3Z', 'M9 12.2l2 2 4-4'],
+  folder: ['M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z'],
+  box: [
+    'M12 3 3.5 7.5v9L12 21l8.5-4.5v-9L12 3Z',
+    'M3.5 7.5 12 12l8.5-4.5',
+    'M12 12v9',
+  ],
+  // 新建窗口 / 工作区
+  window: ['M3 5.5h18v13H3z', 'M3 9.5h18', 'M6.2 7.5v.2', 'M8.8 7.5v.2'],
 }
 
 const paths = computed(() => ICONS[props.name] || ICONS.sparkles)

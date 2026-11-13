@@ -8,22 +8,142 @@ import { chatUrlPreview, resetSettings, settings, API_PRESETS } from '../store/s
 import { resolvedTheme, setTheme, theme } from '../store/theme'
 import { closeSettings } from '../store/ui'
 import { toast } from '../store/toast'
-import { userAvatar, aiAvatar, aiName, setUserAvatar, setAiAvatar, setAiName } from '../store/user'
+import { userAvatar, aiAvatar, aiName, currentProviderType, updateName, updateAvatar, getProfileByProvider, setUserAvatar } from '../store/user'
 import { exportAllSessions } from '../utils/export'
+import { fileToAvatarDataUrl, AvatarError } from '../utils/image'
 import defaultUserAvatar from '../assets/batman.svg'
-import trumpIcon from '../assets/trumpIcon.svg'
-import { plugins, fetchPlugins, uploadPlugin, togglePlugin, removePlugin, renamePlugin } from '../store/plugins'
+import AiAvatar from './AiAvatar.vue'
+import { plugins, jsPluginList, fetchPlugins, uploadPlugin, togglePlugin, removePlugin, renamePlugin, exePlugins, exePluginList, exeLoading, fetchExePlugins, toggleExePlugin } from '../store/plugins'
+import ExePluginCard from './ExePluginCard.vue'
+import { checkPythonHealth } from '../api/localPython'
+import { openAdShield, ui } from '../store/ui'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
 })
 
 const activeTab = ref('basic')
+// 👈 插件管理下的二级 Tab：'js' 普通插件 / 'exe' 可执行插件
+const pluginTab = ref('js')
+
+/* ── 「聚焦 API Key」联动 ────────────────────────────────────
+ * 顶部下拉选中 DeepSeek / OpenAI 兼容时，ui.apiKeyFocus 自增，
+ * 这里负责：切到基础设置 Tab → 等 DOM/动画就绪 → 聚焦 + 高亮提示。
+ */
+const apiKeyRef = ref(null)
+const apiKeyHint = ref(false)
+let apiKeyTimer = null
+/**
+ * 程序性聚焦标志。
+ *
+ * el.focus() 会同步触发 @focus 事件，如果不拦住，
+ * 下面刚点亮的高亮会被 clearApiKeyHint 立刻清掉（白闪一下）。
+ * 所以程序聚焦前置位，事件回调里看到标志就跳过清理。
+ */
+let programmaticFocus = false
+
+function clearApiKeyHint() {
+  apiKeyHint.value = false
+  if (apiKeyTimer) {
+    clearTimeout(apiKeyTimer)
+    apiKeyTimer = null
+  }
+}
+
+/** 用户手动聚焦到输入框时，撤掉提示（但程序聚焦不算） */
+function onApiKeyFocus() {
+  if (programmaticFocus) return
+  clearApiKeyHint()
+}
+
+/** 输入框一旦被用户操作，立刻撤掉高亮，避免一直亮着 */
+function onApiKeyInput(e) {
+  currentConfig.value = { ...currentConfig.value, apiKey: e.target.value }
+  clearApiKeyHint()
+}
+
+/** 当前服务名，用于「在这里填入 XX 的 API Key」提示 */
+const presetDisplayName = computed(() => {
+  const url = currentConfig.value.baseUrl || ''
+  const matched = API_PRESETS.find(
+    (p) => p.value?.baseUrl === url || p.headerValue?.baseUrl === url,
+  )
+  if (matched) return matched.label
+  return currentConfig.value.protocol === 'openai' ? '云端服务' : '本地服务'
+})
+
+watch(
+  () => ui.apiKeyFocus,
+  async (token) => {
+    // 只看令牌：令牌自增就代表调用方明确要求聚焦。
+    // 不在这里判断 props.open —— 父组件重渲染与子组件 watcher 的先后顺序
+    // 依赖调度细节，卡在这里可能直接吞掉整次请求。
+    if (!token) return
+
+    // 1. 确保停在「基础设置」Tab —— 输入框在 v-show 的另一个 Tab 里时无法聚焦
+    activeTab.value = 'basic'
+
+    // 2. 等一帧让 Tab 切换和面板过渡开始
+    await nextTick()
+
+    // 3. 面板入场动画是 opacity 0.22s + transform 0.28s，
+    //    在 transform 还没结束时 focus 会被浏览器的「滚动到可见」打断，
+    //    所以等满 0.28s（取 300ms 留余量）再聚焦。
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    if (!props.open) return
+
+    // 输入框可能还没挂载（面板刚从 display:none 出来），再等一帧
+    await nextTick()
+    let el = apiKeyRef.value
+    if (!el) {
+      // 最后再兜一次：某些情况下过渡结束比 220ms 略晚
+      await new Promise((resolve) => setTimeout(resolve, 160))
+      if (!props.open) return
+      el = apiKeyRef.value
+    }
+    if (!el) return
+
+    // 先点亮高亮，再聚焦：顺序反过来会因为 focus 同步触发而闪一下
+    apiKeyHint.value = true
+
+    programmaticFocus = true
+    try {
+      el.focus()
+      // 聚焦后把光标放到末尾，而不是全选（用户可能是来补后半段）
+      const len = el.value?.length ?? 0
+      try {
+        el.setSelectionRange(len, len)
+      } catch {
+        // type=password 在部分环境不支持 setSelectionRange，忽略即可
+      }
+    } finally {
+      programmaticFocus = false
+    }
+
+    // 高亮脉冲：2.4s 后自动熄灭
+    if (apiKeyTimer) clearTimeout(apiKeyTimer)
+    apiKeyTimer = setTimeout(() => {
+      apiKeyHint.value = false
+      apiKeyTimer = null
+    }, 2400)
+  },
+)
+
+onBeforeUnmount(clearApiKeyHint)
+
 const testing = ref(false)
 const testResult = ref(null)
 const refreshing = ref(false)
 const showModelDropdown = ref(false)
 const isRefreshingPlugins = ref(false)
+
+// EXE 插件健康状态：与 AdShield 面板共用同一个探测接口
+const exeHealth = ref('checking')
+const exeHealthDetail = ref('')
+const togglingExeId = ref('')
+
+// 👈 失焦自动拉取的 loading 状态：防止用户来回切换焦点时重复发起请求
+const isFetching = ref(false)
 
 // 👈 插件重命名状态
 const editingPluginId = ref(null)
@@ -32,6 +152,23 @@ const pluginEditRef = ref(null)
 
 const fetchedModels = ref([])
 const isSessionOverride = computed(() => !!activeSession.value?.config)
+
+// 👈 高级生成参数折叠面板的展开状态（默认收起，避免设置面板过长）
+const advancedOpen = ref(false)
+
+// 无活动对话时的兜底：让设置面板的修改仍能写回全局 settings，
+// 否则自动拉取选中的模型会「看起来没生效」。
+function commitConfig(next) {
+  if (activeSession.value) {
+    updateSessionConfig(activeSession.value.id, next)
+    testResult.value = null
+    return
+  }
+  settings.protocol = next.protocol
+  settings.baseUrl = next.baseUrl
+  settings.apiKey = next.apiKey
+  settings.model = next.model
+}
 
 const currentConfig = computed({
   get: () => {
@@ -42,18 +179,14 @@ const currentConfig = computed({
       model: settings.model,
     }
   },
-  set: (val) => {
-    if (activeSession.value) {
-      updateSessionConfig(activeSession.value.id, val)
-      testResult.value = null
-    }
-  }
+  set: (val) => commitConfig(val)
 })
 
 function onClose() {
   if (activeSession.value) {
     updateSessionConfig(activeSession.value.id, { ...currentConfig.value })
   }
+  clearApiKeyHint()
   closeSettings()
 }
 
@@ -86,19 +219,34 @@ const availableModels = computed(() => {
     const localPreset = API_PRESETS.find(p => p.label === '本地 Ollama')?.models || []
     return Array.from(new Set([...(settings.models || []), ...localPreset])).filter(Boolean)
   }
-  const matchedPreset = API_PRESETS.find(p => p.value.baseUrl === currentUrl)
-  return matchedPreset?.models || ['deepseek-flash', 'deepseek-v4-pro']
+  // 同一预设可能以 value / headerValue 两种 baseUrl 形式存在，都要能命中
+  const matchedPreset = API_PRESETS.find(p =>
+    [p.value, p.headerValue].filter(Boolean).some(v => v.baseUrl === currentUrl)
+  )
+  return matchedPreset?.models || ['deepseek-chat', 'deepseek-reasoner']
 })
 
 function usePreset(preset) {
   if (!preset.value) return
   fetchedModels.value = []
+  // 快捷预设统一使用 value 形式的 baseUrl（DeepSeek 为 https://api.deepseek.com/v1）
+  const target = preset.value
   let newKey = currentConfig.value.apiKey
-  if (preset.value.protocol === 'ollama') newKey = ''
-  else if (currentConfig.value.baseUrl !== preset.value.baseUrl) newKey = ''
-  currentConfig.value = { ...currentConfig.value, protocol: preset.value.protocol, baseUrl: preset.value.baseUrl, model: preset.value.model, apiKey: newKey }
+  if (target.protocol === 'ollama') newKey = ''
+  else if (currentConfig.value.baseUrl !== target.baseUrl) newKey = ''
+  // 联动：protocol 写入后，下方「Ollama 原生 / OpenAI 兼容」切换 Tab 自动选中对应项
+  currentConfig.value = {
+    ...currentConfig.value,
+    protocol: target.protocol,
+    baseUrl: target.baseUrl,
+    model: target.model,
+    apiKey: newKey,
+  }
   toast.success(`已切换至: ${preset.label}`)
-  if (preset.value.protocol === 'openai' && !newKey) {
+  if (preset.custom) {
+    // 「OpenAI 兼容」不预填地址，引导用户手动填写
+    setTimeout(() => toast.info('请在下方填入兼容服务的 Base URL 与模型名称'), 300)
+  } else if (target.protocol === 'openai' && !newKey) {
     setTimeout(() => toast.info('请在下方 API Key 输入框中填入你的密钥'), 300)
   }
 }
@@ -120,8 +268,58 @@ watch(() => props.open, async (isOpen) => {
       checkStatus().then(res => { if (res.ok && !chat.streaming) chat.status = 'online' })
     }
     fetchPlugins() 
+    // EXE 插件独立数据源，顺带把健康状态也探一次
+    fetchExePlugins()
+    refreshExeHealth()
   }
 })
+
+// ================= EXE 插件 =================
+
+/** 探测 EXE 插件健康状态（文件存在 / 大小 / 布局） */
+async function refreshExeHealth() {
+  const result = await checkPythonHealth()
+  if (result.alive) exeHealth.value = 'alive'
+  else if (result.degraded) exeHealth.value = 'degraded'
+  else exeHealth.value = 'down'
+  exeHealthDetail.value = result.message || ''
+}
+
+async function onToggleExePlugin({ plugin, enabled }) {
+  if (togglingExeId.value) return
+  togglingExeId.value = plugin.id
+  try {
+    await toggleExePlugin(plugin.id, enabled)
+    toast.success(enabled ? `${plugin.displayName} 已启用` : `${plugin.displayName} 已禁用`)
+  } catch (err) {
+    toast.error(err.message || '切换失败')
+    // 回滚 UI：重新拉一次以服务端为准
+    await fetchExePlugins()
+  } finally {
+    togglingExeId.value = ''
+  }
+}
+
+/** 打开 AdShield 操作控制台（叠在设置面板之上） */
+function onOpenExePlugin(plugin) {
+  if (!plugin.enabled) {
+    toast.info('请先启用该插件')
+    return
+  }
+  // 目前只有一个 EXE 插件（AdShield），按 exe 文件名分流；
+  // 将来接第二个插件时在这里加分支即可。
+  if (/adshield/i.test(plugin.name) || /adshield/i.test(plugin.exePath || '')) {
+    openAdShield(plugin.id)
+  } else {
+    toast.info(`「${plugin.displayName}」暂无可视化控制台`)
+  }
+}
+
+async function handleRefreshExePlugins() {
+  if (exeLoading.value) return
+  await Promise.all([fetchExePlugins(), refreshExeHealth()])
+  toast.success('已刷新 EXE 插件列表')
+}
 
 const userInput = ref(null)
 const aiInput = ref(null)
@@ -131,22 +329,24 @@ function triggerUpload(type) {
   else aiInput.value?.click()
 }
 
-function handleFileChange(e, type) {
-  const file = e.target.files[0]
-  if (!file) return
-  if (file.size > 10 * 1024 * 1024) return toast.error('图片太大，请上传 10MB 以内的图片')
-  const reader = new FileReader()
-  reader.onload = (event) => {
-    if (type === 'user') setUserAvatar(event.target.result)
-    else setAiAvatar(event.target.result)
-    toast.success('头像已更新')
-  }
-  reader.readAsDataURL(file)
+async function handleFileChange(e, type) {
+  const file = e.target.files?.[0]
+  // 先清空，否则连续选同一张图不会再触发 change
   e.target.value = ''
+  if (!file) return
+  try {
+    // 统一压缩：128x128 JPEG，避免几 MB 原图撑爆 profile blob
+    const { dataUrl } = await fileToAvatarDataUrl(file)
+    if (type === 'user') await setUserAvatar(dataUrl)
+    else updateAvatar(currentProviderType.value, dataUrl)
+    toast.success('头像已更新')
+  } catch (err) {
+    toast.error(err instanceof AvatarError ? err.message : '头像处理失败，请换一张试试')
+  }
 }
 
 function resetUserAvatar() { setUserAvatar(''); toast.success('已恢复默认用户头像') }
-function resetAiAvatar() { setAiAvatar(''); toast.success('已恢复默认 AI 头像') }
+function resetAiAvatar() { updateAvatar(currentProviderType.value, ''); toast.success('已恢复默认 AI 头像') }
 
 // ================= 插件相关 =================
 const pluginInput = ref(null)
@@ -304,6 +504,89 @@ async function refreshModels() {
   }
 }
 
+// ================= 失焦自动拉取模型 =================
+// 交互约定：
+// 1. API Key / 接口地址失焦时触发，两者都非空才拉取；
+// 2. 防抖 350ms —— 用户在同一块区域连续跳焦点只发一次请求；
+// 3. isFetching 兜底，避免用户反复切焦点造成请求堆积；
+// 4. 成功后默认选中列表第一项，失败则清空模型名称并给出红色提示。
+const AUTO_FETCH_DEBOUNCE = 350
+const AUTO_FETCH_ERROR = '拉取失败，请检查 API Key 和接口地址是否正确'
+let autoFetchTimer = null
+
+function clearAutoFetchTimer() {
+  if (autoFetchTimer) {
+    clearTimeout(autoFetchTimer)
+    autoFetchTimer = null
+  }
+}
+
+/**
+ * 前置校验：接口地址与 API Key 都非空，且当前没有正在进行的拉取。
+ * 返回 true 表示可以放行。
+ */
+function canAutoFetch(config) {
+  const baseUrl = String(config.baseUrl ?? '').trim()
+  const apiKey = String(config.apiKey ?? '').trim()
+  if (!baseUrl || !apiKey) return false
+  if (isFetching.value) {
+    toast.info('正在拉取模型列表，请稍候…')
+    return false
+  }
+  return true
+}
+
+// 失焦入口：先做防抖，真正的校验与请求放到防抖回调里执行
+function onProviderFieldBlur() {
+  clearAutoFetchTimer()
+  const snapshot = { ...currentConfig.value }
+  if (!canAutoFetch(snapshot)) return
+  autoFetchTimer = setTimeout(() => {
+    autoFetchTimer = null
+    autoFetchModels(snapshot)
+  }, AUTO_FETCH_DEBOUNCE)
+}
+
+async function autoFetchModels(snapshot) {
+  // 防抖期间配置可能又被改动，这里再校验一次
+  if (!canAutoFetch(snapshot) || isFetching.value) return
+  // 焦点可能已经切走/面板已关闭
+  if (!props.open || activeTab.value !== 'basic') return
+
+  isFetching.value = true
+  try {
+    // 约定：发起请求前先把模型名称置空，避免残留上一个服务的模型名
+    currentConfig.value = { ...snapshot, model: '' }
+    fetchedModels.value = []
+
+    const result = await checkStatus({ ...snapshot, model: '' })
+    if (result.ok) {
+      const models = Array.isArray(result.models) ? result.models : []
+      fetchedModels.value = models
+      if (models.length > 0) {
+        // 自动选中第一个，例如拿到 deepseek-flash / deepseek-v4-pro 就选 deepseek-flash
+        currentConfig.value = { ...snapshot, model: models[0] }
+        toast.success(`已刷新，共 ${models.length} 个模型`)
+      } else {
+        // 连接成功但没有可用模型，同样视为拉取失败
+        currentConfig.value = { ...snapshot, model: '' }
+        toast.error(AUTO_FETCH_ERROR)
+      }
+    } else {
+      currentConfig.value = { ...snapshot, model: '' }
+      fetchedModels.value = []
+      toast.error(AUTO_FETCH_ERROR)
+    }
+  } catch (err) {
+    // checkStatus 内部已 try/catch，这里只是兜底，保证绝不抛到渲染层
+    currentConfig.value = { ...snapshot, model: '' }
+    fetchedModels.value = []
+    toast.error(AUTO_FETCH_ERROR)
+  } finally {
+    isFetching.value = false
+  }
+}
+
 function applyPrompt(preset) { settings.systemPrompt = preset.value }
 
 function onReset() {
@@ -327,6 +610,9 @@ function onExportAll() {
   exportAllSessions(chat.sessions)
   toast.success('已导出全部对话')
 }
+
+// 面板关闭/卸载时清掉待执行的防抖定时器，避免组件销毁后仍触发请求
+onBeforeUnmount(clearAutoFetchTimer)
 </script>
 
 <template>
@@ -341,7 +627,7 @@ function onExportAll() {
               <p>调整模型服务、插件与外观</p>
             </div>
           </div>
-          <button type="button" class="icon-btn" title="关闭（Esc）" @click="onClose">
+          <button type="button" class="dialog-close" title="关闭（Esc）" aria-label="关闭设置" @click="onClose">
             <AppIcon name="x" :size="18" />
           </button>
         </header>
@@ -369,12 +655,11 @@ function onExportAll() {
                   </div>
                 </div>
                 <div class="avatar-setting">
-                  <div class="avatar-preview ai-avatar">
-                    <img v-if="aiAvatar" :src="aiAvatar" alt="AI 头像" />
-                    <img v-else :src="trumpIcon" class="avatar-img" alt="默认 AI 头像" />
-                  </div>
+                  <!-- 直接渲染 AiAvatar（52px 档），不再套 52px 的 .avatar-preview，
+                       否则两层圆角容器会互相裁切 -->
+                  <AiAvatar size="settings" resettable />
                   <div class="avatar-actions">
-                    <input type="file" ref="aiInput" accept="image/*" style="display: none" @change="handleFileChange($event, 'ai')" />
+                    <input type="file" ref="aiInput" accept="image/png, image/jpeg" style="display: none" @change="handleFileChange($event, 'ai')" />
                     <button type="button" class="btn btn-sm" @click="triggerUpload('ai')">更换 AI 头像</button>
                     <button v-if="aiAvatar" type="button" class="link-btn" @click="resetAiAvatar">恢复默认</button>
                   </div>
@@ -382,7 +667,17 @@ function onExportAll() {
               </div>
               <div class="field" style="margin-top: 8px;">
                 <label class="field-label">AI 称呼</label>
-                <input :value="aiName" class="input" placeholder="例如：大肥鱼" @input="e => setAiName(e.target.value)" />
+                <input
+                  :value="aiName"
+                  class="input"
+                  placeholder="例如：大肥鱼"
+                  @input="e => updateName(currentProviderType, e.target.value, { deferred: true })"
+                />
+                <p class="hint">
+                  仅影响「{{ currentProviderType === 'api' ? '云端' : '本地' }}」模式；
+                  本地当前为「{{ getProfileByProvider('local').name }}」，
+                  云端当前为「{{ getProfileByProvider('api').name }}」。
+                </p>
               </div>
             </section>
 
@@ -411,12 +706,31 @@ function onExportAll() {
               </div>
               <div class="field">
                 <label class="field-label">接口地址</label>
-                <input :value="currentConfig.baseUrl" @input="setBaseUrl" class="input" spellcheck="false" placeholder="/api" />
+                <input :value="currentConfig.baseUrl" @input="setBaseUrl" @blur="onProviderFieldBlur" class="input" spellcheck="false" placeholder="/api" />
                 <p class="hint">实际请求：<code>{{ chatUrlPreview(currentConfig) }}</code></p>
               </div>
               <div class="field">
                 <label class="field-label">API Key <span class="optional">可选</span></label>
-                <input :value="currentConfig.apiKey" @input="e => currentConfig = { ...currentConfig, apiKey: e.target.value }" class="input" type="password" placeholder="使用云端模型需填 Key" />
+                <input
+                  ref="apiKeyRef"
+                  :value="currentConfig.apiKey"
+                  :class="['input', { 'is-highlighted': apiKeyHint }]"
+                  @input="onApiKeyInput"
+                  @blur="onProviderFieldBlur"
+                  @focus="onApiKeyFocus"
+                  type="password"
+                  placeholder="使用云端模型需填 Key"
+                />
+                <p v-if="apiKeyHint" class="hint is-focus-hint">
+                  <AppIcon name="sparkles" :size="12" /> 在这里填入 {{ presetDisplayName }} 的 API Key
+                </p>
+                <p v-else-if="isFetching" class="hint is-fetching"><AppIcon name="refresh" :size="12" class="spin" /> 正在拉取模型列表…</p>
+              </div>
+              <!-- 👇 新增：网络代理（全局设置，作用于后端发往模型服务的请求） -->
+              <div class="field">
+                <label class="field-label">网络代理 <span class="optional">全局 · 可选</span></label>
+                <input v-model.trim="settings.proxyUrl" class="input" spellcheck="false" placeholder="http://127.0.0.1:10808（留空不启用）" />
+                <p class="hint">访问 https 模型服务（DeepSeek / OpenAI 兼容等）时经此代理转发；本地 Ollama 与页面本身不受影响。</p>
               </div>
               <div class="field">
                 <label class="field-label">模型名称</label>
@@ -430,9 +744,43 @@ function onExportAll() {
                       </div>
                     </Transition>
                   </div>
-                  <button type="button" class="btn btn-sm" :disabled="refreshing" @click="refreshModels"><AppIcon name="refresh" :size="13" :class="{ 'spin': refreshing }" /> 拉取</button>
+                  <button type="button" class="btn btn-sm" :disabled="refreshing || isFetching" @click="refreshModels"><AppIcon name="refresh" :size="13" :class="{ 'spin': refreshing || isFetching }" /> 拉取</button>
                 </div>
               </div>
+
+              <!-- 👇 新增：高级生成参数折叠面板（模型名称下方，默认收起） -->
+              <div class="adv-collapse">
+                <button type="button" class="adv-toggle" :class="{ open: advancedOpen }" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">
+                  <AppIcon name="cpu" :size="14" />
+                  高级生成参数
+                  <AppIcon name="chevronDown" :size="13" class="adv-chevron" />
+                </button>
+                <div class="collapse-body" :class="{ open: advancedOpen }">
+                  <div class="collapse-inner">
+                    <div class="collapse-pad">
+                      <div class="field">
+                        <label class="field-label">温度 Temperature <span class="value-pill">{{ Number(settings.temperature).toFixed(1) }}</span></label>
+                        <input v-model.number="settings.temperature" class="range" type="range" min="0" max="2" step="0.1" />
+                      </div>
+                      <div class="field">
+                        <label class="field-label">最大输出 Token <span class="value-pill">{{ settings.maxTokens > 0 ? settings.maxTokens : '不限' }}</span></label>
+                        <input v-model.number="settings.maxTokens" class="input" type="number" min="0" max="200000" step="128" placeholder="0 = 不限制" />
+                      </div>
+                      <div class="adv-row">
+                        <div>
+                          <p class="adv-title">流式输出 Stream</p>
+                          <p class="adv-sub">开启后逐字返回；关闭则等待完整回复一次性显示</p>
+                        </div>
+                        <label class="toggle-switch">
+                          <input type="checkbox" :checked="settings.stream !== false" @change="settings.stream = $event.target.checked" />
+                          <span class="slider"></span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div class="test-row">
                 <button type="button" class="btn btn-sm" :disabled="testing" @click="testConnection"><AppIcon name="zap" :size="13" /> {{ testing ? '检测中…' : '测试连接' }}</button>
                 <span v-if="testResult" class="test-result" :class="testResult.ok ? 'ok' : 'bad'">{{ testResult.text }}</span>
@@ -440,11 +788,7 @@ function onExportAll() {
             </section>
 
             <section class="block">
-              <div class="block-head"><h3><AppIcon name="cpu" :size="15" /> 生成参数</h3></div>
-              <div class="field">
-                <label class="field-label">温度 <span class="value-pill">{{ Number(settings.temperature).toFixed(1) }}</span></label>
-                <input v-model.number="settings.temperature" class="range" type="range" min="0" max="2" step="0.1" />
-              </div>
+              <div class="block-head"><h3><AppIcon name="cpu" :size="15" /> 上下文</h3></div>
               <div class="field">
                 <label class="field-label">上下文轮数 <span class="value-pill">{{ settings.contextRounds }} 轮</span></label>
                 <input v-model.number="settings.contextRounds" class="range" type="range" min="1" max="30" step="1" />
@@ -480,20 +824,50 @@ function onExportAll() {
           </div>
 
           <div v-show="activeTab === 'plugins'" class="tab-content plugins-tab">
-            <div class="plugins-header">
-              <div style="display: flex; align-items: center; gap: 10px;">
-                <h3>已安装</h3>
-                <span class="plugin-count">{{ plugins.length }} 个</span>
-              </div>
-              <div style="display: flex; gap: 6px;">
-                <input type="file" ref="pluginInput" accept=".js" style="display: none" @change="handlePluginFile" />
-                <input type="file" ref="pluginFolderInput" webkitdirectory directory multiple style="display: none" @change="handlePluginFolder" />
-                <button type="button" class="btn btn-sm" @click="triggerPluginUpload">
-                  <AppIcon name="plus" :size="13" /> 单文件
-                </button>
-                <button type="button" class="btn btn-sm" @click="triggerFolderUpload">
-                  <AppIcon name="folder" :size="13" /> 文件夹
-                </button>
+            <!-- ===== 二级 Tab：普通插件 / EXE 插件 ===== -->
+            <div class="sub-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                class="sub-tab"
+                :class="{ active: pluginTab === 'js' }"
+                :aria-selected="pluginTab === 'js'"
+                @click="pluginTab = 'js'"
+              >
+                <AppIcon name="braces" :size="13" />
+                普通插件
+                <span class="sub-tab-count">{{ jsPluginList.length }}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                class="sub-tab"
+                :class="{ active: pluginTab === 'exe' }"
+                :aria-selected="pluginTab === 'exe'"
+                @click="pluginTab = 'exe'"
+              >
+                <AppIcon name="zap" :size="13" />
+                EXE 插件
+                <span class="sub-tab-count">{{ exePluginList.length }}</span>
+              </button>
+            </div>
+
+            <!-- ===== 普通插件 ===== -->
+            <template v-if="pluginTab === 'js'">
+              <div class="plugins-header">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <h3>已安装</h3>
+                  <span class="plugin-count">{{ jsPluginList.length }} 个</span>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <input type="file" ref="pluginInput" accept=".js" style="display: none" @change="handlePluginFile" />
+                  <input type="file" ref="pluginFolderInput" webkitdirectory directory multiple style="display: none" @change="handlePluginFolder" />
+                  <button type="button" class="btn btn-sm" @click="triggerPluginUpload">
+                    <AppIcon name="plus" :size="13" /> 单文件
+                  </button>
+                  <button type="button" class="btn btn-sm" @click="triggerFolderUpload">
+                    <AppIcon name="folder" :size="13" /> 文件夹
+                  </button>
                 <button type="button" class="btn btn-sm" :disabled="isRefreshingPlugins" @click="handleRefreshPlugins">
                   <AppIcon name="refresh" :size="13" :class="{ 'spin': isRefreshingPlugins }" /> 刷新
                 </button>
@@ -504,8 +878,8 @@ function onExportAll() {
               <p style="font-size: 11px;">支持单文件或整个文件夹上传，或放入 <code>server/plugins</code> 文件夹后点击刷新。</p>
             </div>
 
-            <div class="plugin-list" v-if="plugins.length > 0">
-              <div v-for="plugin in plugins" :key="plugin.id" class="plugin-card">
+            <div class="plugin-list" v-if="jsPluginList.length > 0">
+              <div v-for="plugin in jsPluginList" :key="plugin.id" class="plugin-card">
                 <div class="plugin-main">
                   <div class="plugin-icon"><AppIcon name="zap" :size="24" style="color: #4f46e5" /></div>
                   <div class="plugin-info">
@@ -554,6 +928,56 @@ function onExportAll() {
               <AppIcon name="box" :size="32" style="opacity: 0.5; margin-bottom: 8px;" />
               <p>暂无安装的插件</p>
             </div>
+            </template>
+
+            <!-- ===== EXE 插件 ===== -->
+            <template v-else>
+              <div class="plugins-header">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <h3>可执行插件</h3>
+                  <span class="plugin-count">{{ exePluginList.length }} 个</span>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="exeLoading"
+                  @click="handleRefreshExePlugins"
+                >
+                  <AppIcon name="refresh" :size="13" :class="{ spin: exeLoading }" /> 刷新
+                </button>
+              </div>
+
+              <div class="empty-plugins" style="padding-top: 10px; margin-bottom: 10px; border-bottom: 1px dashed var(--glass-border);">
+                <p style="font-size: 11px;">
+                  独立编译的可执行插件。把整个 exe 目录放入
+                  <code>server/plugins</code> 后点击刷新。
+                </p>
+              </div>
+
+              <div class="exe-list" v-if="exePluginList.length > 0">
+                <ExePluginCard
+                  v-for="item in exePluginList"
+                  :key="item.id"
+                  :plugin="item"
+                  :health="exeHealth"
+                  :toggling="togglingExeId === item.id"
+                  @toggle="onToggleExePlugin"
+                  @open="onOpenExePlugin"
+                />
+              </div>
+
+              <div v-else-if="exeLoading" class="empty-plugins">
+                <p>正在扫描…</p>
+              </div>
+
+              <div v-else class="empty-plugins">
+                <AppIcon name="box" :size="32" style="opacity: 0.5; margin-bottom: 8px;" />
+                <p>暂无 EXE 插件</p>
+                <p style="font-size: 11px; margin-top: 4px;">
+                  把编译好的 exe 目录放进 <code>server/plugins</code> 即可被识别
+                </p>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -571,7 +995,9 @@ function onExportAll() {
         <div class="readme-modal">
           <header>
             <h3>{{ readmeTitle }} <span>README</span></h3>
-            <button class="icon-btn" @click="readmeShow = false"><AppIcon name="x" :size="18" /></button>
+            <button class="dialog-close" title="关闭" aria-label="关闭文档" @click="readmeShow = false">
+              <AppIcon name="x" :size="18" />
+            </button>
           </header>
           <div class="readme-content">
             <MarkdownBody v-if="readmeContent" :source="readmeContent" />
@@ -634,18 +1060,122 @@ function onExportAll() {
 .dropdown-item { width: 100%; display: block; padding: 8px 10px; font-size: 12.5px; color: var(--text); text-align: left; border-radius: 6px; font-family: var(--font-mono); transition: background 0.15s; }
 .dropdown-item:hover { background: var(--glass-hover); }
 .hint { font-size: 11px; color: var(--faint); line-height: 1.45; }
+.hint.is-fetching { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+
+/* ── 「聚焦 API Key」高亮提示 ──
+ * 用动画而不是静态边框：脉冲 3 次后停住，等定时器把 class 摘掉。
+ * box-shadow 不占布局，不会让下方元素跳动。
+ */
+.hint.is-focus-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent-2);
+  font-weight: 500;
+}
+.input.is-highlighted {
+  border-color: var(--accent-1);
+  animation: api-key-pulse 0.9s var(--ease) 3;
+}
+@keyframes api-key-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0);
+    border-color: var(--glass-border-strong);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.22);
+    border-color: var(--accent-1);
+  }
+}
+/* 尊重系统的「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .input.is-highlighted {
+    animation: none;
+    border-color: var(--accent-1);
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.22);
+  }
+}
 .optional { font-size: 10px; color: var(--faint); font-weight: 400; }
 .value-pill { font-family: var(--font-mono); font-size: 10.5px; padding: 1px 7px; border-radius: 999px; color: var(--text); background: var(--glass-hover); border: 1px solid var(--glass-border); }
 .test-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .test-result { font-size: 11px; line-height: 1.4; color: var(--muted); flex: 1; min-width: 0; }
 .test-result.ok { color: #34d399; }
 .test-result.bad { color: #fb7185; }
+
+/* ===== 高级生成参数折叠面板 ===== */
+.adv-collapse { border: 1px dashed var(--glass-border); border-radius: 12px; overflow: hidden; }
+.adv-toggle { width: 100%; display: flex; align-items: center; gap: 7px; padding: 9px 11px; font-size: 12px; font-weight: 620; color: var(--muted); transition: color 0.15s, background 0.15s; }
+.adv-toggle:hover { color: var(--text); background: var(--glass-hover); }
+.adv-toggle.open { color: var(--text-strong); border-bottom: 1px solid var(--glass-border); }
+.adv-chevron { margin-left: auto; transition: transform 0.22s var(--ease); }
+.adv-toggle.open .adv-chevron { transform: rotate(180deg); }
+/* grid-template-rows 0fr→1fr 技巧：内层 overflow:hidden + min-height:0 实现平滑展开 */
+.collapse-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.28s var(--ease); }
+.collapse-body.open { grid-template-rows: 1fr; }
+.collapse-inner { overflow: hidden; min-height: 0; }
+.collapse-pad { display: flex; flex-direction: column; gap: 11px; padding: 11px 11px 12px; }
+.adv-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.adv-title { font-size: 12.5px; font-weight: 620; color: var(--text); }
+.adv-sub { font-size: 11px; color: var(--faint); margin-top: 2px; line-height: 1.45; }
 .data-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .version { text-align: center; font-size: 10.5px; color: var(--faint); padding: 4px 0 10px; }
 .panel-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 18px calc(14px + env(safe-area-inset-bottom)); flex: none; border-top: 1px solid var(--glass-border); }
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .plugins-tab { padding-top: 4px; }
+
+/* ===== 二级 Tab（普通插件 / EXE 插件）===== */
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 11px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  margin-bottom: 4px;
+}
+.sub-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  transition: color 0.18s var(--ease), background 0.18s var(--ease),
+    box-shadow 0.18s var(--ease);
+}
+.sub-tab:hover { color: var(--text); }
+.sub-tab.active {
+  color: var(--text-strong);
+  background: var(--accent-grad-soft);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.34);
+}
+.sub-tab.active :deep(svg) { color: var(--accent-1); }
+.sub-tab-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--faint);
+  background: var(--glass-hover);
+  border: 1px solid var(--glass-border);
+}
+.sub-tab.active .sub-tab-count {
+  color: var(--accent-1);
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+
+.exe-list { display: flex; flex-direction: column; gap: 12px; }
 .plugins-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .plugins-header h3 { font-size: 14px; font-weight: 600; color: var(--text-strong); }
 .plugin-count { font-size: 12px; color: var(--muted); }

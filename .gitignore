@@ -47,3 +47,13 @@ server/temp_uploads/
 .vscode/
 
 release/
+# ==========================================
+# Python 微服务
+# ==========================================
+python-service/.venv/
+python-service/__pycache__/
+python-service/*.pyc
+
+
+# PyInstaller 编译的 EXE 插件产物
+server/plugins/adshield_exe/

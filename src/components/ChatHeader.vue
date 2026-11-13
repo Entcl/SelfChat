@@ -1,14 +1,15 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
+import WindowControls from './WindowControls.vue'
 import { activeSession, chat, createSession, renameSession, updateSessionConfig } from '../store/chat'
 import { settings, API_PRESETS } from '../store/settings'
 import { cycleTheme, resolvedTheme, theme } from '../store/theme'
-import { openDrawer, openSettings, toggleExportMenu, ui } from '../store/ui'
+import { focusApiKey, openDrawer, openSettings, toggleExportMenu, ui } from '../store/ui'
 import { toast } from '../store/toast'
 import { exportAllSessions, exportSession } from '../utils/export'
-import { aiAvatar, aiName } from '../store/user'
-import trumpIcon from '../assets/trumpIcon.svg'
+import { aiName } from '../store/user'
+import AiAvatar from './AiAvatar.vue'
 
 const session = activeSession
 const menuRef = ref(null)
@@ -17,51 +18,72 @@ const draft = ref('')
 const titleRef = ref(null)
 
 const apiMenuOpen = ref(false)
+/** 联动聚焦的延迟定时器（组件卸载/重复点击时清理） */
+let focusTimer = null
 const apiMenuRef = ref(null)
 
 const currentApiLabel = computed(() => {
   if (!session.value?.config) return '跟随全局'
-  const match = API_PRESETS.find(p => 
-    p.value?.model === session.value.config?.model && 
-    p.value?.baseUrl === session.value.config?.baseUrl
+  const conf = session.value.config
+  // 同一个预设可能以两种 baseUrl 形式落地（value / headerValue），都要能匹配上标签
+  const match = API_PRESETS.find((p) =>
+    [p.value, p.headerValue].filter(Boolean).some(
+      (v) => v?.model === conf?.model && v?.baseUrl === conf?.baseUrl,
+    ),
   )
   return match ? match.label : '自定义'
 })
 
 function changeApiPreset(preset) {
-  // 👈 核心修复 1：立即关闭菜单，防止卡死或视觉残留
+  // 立即关闭菜单，防止卡死或视觉残留
   apiMenuOpen.value = false
-  
-  console.log('点击了预设:', preset)
 
-  if (!session.value) {
-    console.log('无当前会话，取消切换')
-    return
-  }
-  
+  if (!session.value) return
+
   try {
     if (!preset.value) {
       updateSessionConfig(session.value.id, null)
       toast.success('已恢复跟随全局设置')
-    } else {
-      let newKey = session.value.config?.apiKey || ''
-      if (preset.value.protocol === 'ollama') {
-        newKey = ''
-      } else if (session.value.config?.baseUrl !== preset.value.baseUrl) {
-        newKey = ''
-      }
-      
-      updateSessionConfig(session.value.id, {
-        ...preset.value,
-        apiKey: newKey
-      })
-      toast.success(`已应用模板: ${preset.label}`)
+      return
+    }
 
-      if (preset.value.protocol === 'openai' && !newKey) {
-        setTimeout(() => {
-          toast.info(`使用 ${preset.label} 需要填写 API Key，请前往设置`)
-        }, 300)
-      }
+    // 头部下拉使用 headerValue（如 DeepSeek 填 https://api.deepseek.com），
+    // 未定义 headerValue 的预设回退到 value
+    const target = preset.headerValue || preset.value
+
+    let newKey = session.value.config?.apiKey || ''
+    if (target.protocol === 'ollama') {
+      newKey = ''
+    } else if (session.value.config?.baseUrl !== target.baseUrl) {
+      newKey = ''
+    }
+
+    updateSessionConfig(session.value.id, {
+      ...target,
+      apiKey: newKey,
+    })
+
+    // ── 云端服务联动 ──────────────────────────────────────────
+    // 选中 DeepSeek / OpenAI 兼容这类需要 Key 的服务时，
+    // 直接把用户送到「基础设置 → 模型服务」并聚焦 API Key 输入框，
+    // 省掉「看到 toast → 自己找设置 → 找 Tab → 找输入框」的四步。
+    const needsKey = target.protocol === 'openai' && !newKey
+    if (needsKey) {
+      toast.success(`已应用模板: ${preset.label}`)
+      // 让 toast 先渲染一帧再开面板，避免两个动效打架。
+      // 连点多次时先清掉上一个定时器，保证只开一次。
+      if (focusTimer) clearTimeout(focusTimer)
+      focusTimer = setTimeout(() => {
+        focusTimer = null
+        focusApiKey()
+      }, 120)
+      return
+    }
+
+    if (preset.custom) {
+      toast.success('已切换至: OpenAI 兼容')
+    } else {
+      toast.success(`已应用模板: ${preset.label}`)
     }
   } catch (err) {
     console.error('切换预设出错:', err)
@@ -79,7 +101,13 @@ function onDocPointerDown(event) {
 }
 
 onMounted(() => document.addEventListener('pointerdown', onDocPointerDown))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocPointerDown))
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown)
+  if (focusTimer) {
+    clearTimeout(focusTimer)
+    focusTimer = null
+  }
+})
 
 const messageCount = computed(() => session.value?.messages.length ?? 0)
 
@@ -130,6 +158,20 @@ async function startRename() {
   titleRef.value?.select()
 }
 
+/**
+ * 双击标题文字进入重命名。
+ *
+ * 为什么要处理「双击拖拽冲突」：
+ * Electron 下 .chat-header 整条是 -webkit-app-region: drag，
+ * 双击会被系统当成「最大化/还原」的手势，浏览器层的 dblclick 可能根本不触发。
+ * 所以标题元素本身标了 -webkit-app-region: no-drag（见样式），
+ * 保证双击事件先到 Vue 手里，同时拖拽其它空白区域仍然正常。
+ */
+function onTitleDblClick() {
+  if (renaming.value) return
+  startRename()
+}
+
 function commitRename() {
   if (!renaming.value) return
   renaming.value = false
@@ -158,10 +200,7 @@ function onTitleKeydown(event) {
         <AppIcon name="menu" :size="19" />
       </button>
 
-      <div class="header-avatar">
-        <img v-if="aiAvatar" :src="aiAvatar" alt="AI 头像" />
-        <img v-else :src="trumpIcon" alt="默认 AI 头像" />
-      </div>
+      <AiAvatar size="header" editable />
 
       <div class="header-titles">
         <div class="title-row">
@@ -174,12 +213,26 @@ function onTitleKeydown(event) {
             @blur="commitRename"
             @keydown="onTitleKeydown"
           />
-          <template v-else>
-            <h2 class="title" :title="session?.title">{{ session?.title || '新对话' }} ({{ aiName }})</h2>
-            <button type="button" class="title-edit" title="重命名对话" @click="startRename">
-              <AppIcon name="edit" :size="12" />
-            </button>
-          </template>
+          <h2
+            v-else
+            class="title"
+            :title="`${session?.title || '新对话'}（双击重命名）`"
+            @dblclick="onTitleDblClick"
+          >{{ session?.title || '新对话' }}</h2>
+          <!-- 角色名改成独立小标签，不再和会话标题拼成一个字符串。
+               用户手动改过名字（如「本地大肥鱼」）时，这里显示的就是他改的那个名字，
+               前面不会再有硬拼的 DeepSeek / 本地 前缀。
+               放在 v-if/v-else 之外，重命名过程中标签不会闪没。 -->
+          <span v-if="aiName" class="role-badge" :title="`当前角色：${aiName}`">{{ aiName }}</span>
+          <button
+            v-if="!renaming"
+            type="button"
+            class="title-edit"
+            title="重命名对话"
+            @click="startRename"
+          >
+            <AppIcon name="edit" :size="12" />
+          </button>
         </div>
 
         <div class="subtitle">
@@ -213,7 +266,7 @@ function onTitleKeydown(event) {
             <!-- 👈 核心修复 3：使用 @mousedown.prevent 替代 @click -->
             <button type="button" class="menu-item" @mousedown.prevent="changeApiPreset({ label: '跟随全局', value: null })">
               <AppIcon name="settings" :size="15" />
-              默认 (跟随设置)
+              默认 (跟随全局设置)
             </button>
             <div class="menu-divider"></div>
             <button v-for="preset in API_PRESETS" :key="preset.label" type="button" class="menu-item" @mousedown.prevent="changeApiPreset(preset)">
@@ -245,6 +298,9 @@ function onTitleKeydown(event) {
       <button type="button" class="icon-btn" title="设置" @click="openSettings">
         <AppIcon name="settings" :size="18" />
       </button>
+
+      <!-- Electron 自绘窗口控制：最小化 / 最大化 / 关闭（浏览器中不渲染） -->
+      <WindowControls />
     </div>
   </header>
 </template>
@@ -253,11 +309,18 @@ function onTitleKeydown(event) {
 /* 保持原样 */
 .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: var(--header-h); padding: 0 18px 0 20px; flex: none; border-bottom: 1px solid var(--glass-border); }
 .header-left { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.header-avatar { display: grid; place-items: center; width: 38px; height: 38px; flex: none; border-radius: 13px; font-size: 17px; font-weight: 700; color: #fff; background: var(--accent-grad); border: 1px solid rgba(255, 255, 255, 0.18); box-shadow: var(--shadow-glow); overflow: hidden; }
-.header-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .header-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.title { font-size: 15px; font-weight: 640; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(46vw, 420px); }
+.title { font-size: 15px; font-weight: 640; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(46vw, 420px); cursor: text; border-radius: 6px; padding: 1px 4px; margin-left: -4px; transition: background 0.16s, color 0.16s; }
+/* 角色名标签：替代原来 `标题 (角色名)` 的丑陋拼接。
+   视觉上明显弱于标题（小字号 + 细边框 + 降饱和），不与会话名争夺注意力。 */
+.role-badge { flex: none; max-width: 140px; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 1.5; color: var(--accent-2); background: rgba(34, 211, 238, 0.1); border: 1px solid rgba(34, 211, 238, 0.28); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 有角色标签时标题让出空间，优先保证标题可读；
+   没有标签时保持原来的宽度，避免标题被无谓截断。 */
+.title-row:has(.role-badge) .title { max-width: min(38vw, 340px); }
+/* 双击可编辑的暗示：悬浮时轻微高亮，不让用户觉得只是个死标题 */
+.title:hover { background: var(--glass-hover); }
+.title:active { background: var(--glass-active); }
 .title-edit { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; color: var(--faint); opacity: 0; transition: opacity 0.16s, color 0.16s, background 0.16s; }
 .header-titles:hover .title-edit, .title-edit:focus-visible { opacity: 1; }
 .title-edit:hover { color: var(--text); background: var(--glass-hover); }
@@ -285,11 +348,21 @@ function onTitleKeydown(event) {
 .menu-enter-active, .menu-leave-active { transition: opacity 0.16s var(--ease), transform 0.16s var(--ease); transform-origin: top right; }
 .menu-enter-from, .menu-leave-to { opacity: 0; transform: translateY(-4px) scale(0.97); }
 .only-mobile { display: none; }
+
+/* Electron 自绘标题栏：头部整条可拖动窗口，内部交互元素逐一豁免。
+   .is-electron 类由 WindowControls 组件挂到 <html> 上，浏览器里不存在，零影响。 */
+html.is-electron .chat-header { -webkit-app-region: drag; }
+html.is-electron .chat-header button { -webkit-app-region: no-drag; }
+html.is-electron .chat-header input { -webkit-app-region: no-drag; }
+html.is-electron .chat-header .menu { -webkit-app-region: no-drag; }
+/* 标题必须豁免拖拽，否则双击会被系统当成「最大化」手势，dblclick 收不到 */
+html.is-electron .chat-header .title { -webkit-app-region: no-drag; }
 @media (max-width: 980px) {
   .only-mobile { display: inline-grid; }
   .chat-header { padding: 0 10px 0 8px; }
-  .header-avatar { width: 34px; height: 34px; font-size: 17px; border-radius: 11px; }
   .title { max-width: 44vw; font-size: 14px; }
+  .title-row:has(.role-badge) .title { max-width: 32vw; }
+  .role-badge { max-width: 92px; font-size: 10px; padding: 0 6px; }
   .hide-sm { display: none; }
   .api-btn { padding: 0; width: 38px; justify-content: center; }
 }

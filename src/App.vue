@@ -1,5 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted } from 'vue'
+import AdShieldPanel from './components/AdShieldPanel.vue'
 import ChatHeader from './components/ChatHeader.vue'
 import Composer from './components/Composer.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -8,7 +9,7 @@ import SettingsPanel from './components/SettingsPanel.vue'
 import Sidebar from './components/Sidebar.vue'
 import ToastHost from './components/ToastHost.vue'
 import { activeSession, chat, checkStatus, createSession, stop } from './store/chat'
-import { closeDrawer, closeSettings, focusSearch, openSettings, toggleExportMenu, ui } from './store/ui'
+import { closeAdShield, closeDrawer, closeSettings, focusSearch, openSettings, toggleAdShield, toggleExportMenu, ui } from './store/ui'
 import { toast } from './store/toast'
 import { exportSession } from './utils/export'
 
@@ -31,6 +32,12 @@ function onKeydown(event) {
     openSettings()
     return
   }
+  // Ctrl/Cmd + Shift + A：唤起 AdShield 激活码生成器
+  if (mod && event.shiftKey && key === 'a') {
+    event.preventDefault()
+    toggleAdShield()
+    return
+  }
   if (mod && event.shiftKey && key === 'e') {
     event.preventDefault()
     if (activeSession.value?.messages.length) {
@@ -42,6 +49,11 @@ function onKeydown(event) {
     return
   }
   if (event.key === 'Escape') {
+    // 层级从高到低：AdShield 控制台叠在设置面板之上，所以先关它
+    if (ui.adshieldOpen) {
+      closeAdShield()
+      return
+    }
     if (ui.settingsOpen) {
       closeSettings()
       return
@@ -92,7 +104,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       </main>
     </div>
 
+    <!-- 层级：SettingsPanel(80) → AdShieldPanel(120)；
+         AdShield 用 Teleport 挂到 body，DOM 顺序不影响层叠，z-index 才是决定性的 -->
     <SettingsPanel :open="ui.settingsOpen" />
+    <AdShieldPanel :open="ui.adshieldOpen" @close="closeAdShield" />
     <ConfirmDialog />
     <ToastHost />
   </div>

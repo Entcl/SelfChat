@@ -1,0 +1,9 @@
+# SelfChat 查资料微服务 —— Python 依赖
+#
+# 安装： python -m pip install -r requirements.txt
+# 国内镜像： python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+fastapi>=0.110,<1.0
+uvicorn>=0.29,<1.0
+# anyio 由 FastAPI 间接引入，这里显式钉住，避免版本漂移导致 to_thread 参数不兼容
+anyio>=4.0,<5.0
