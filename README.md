@@ -491,7 +491,7 @@ Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield
 | 换了窗口就不生效 | 正常现象，开关按工作区隔离，在新窗口重新打开 |
 | 后端日志出现 `tool_calls` 但结果是假的 | 检查 `/api/local-python/search` 是否正常（curl 打一次看真实 stdout），工具结果没回灌成功时模型会自己圆 |
 | 模型回复了正确激活码，界面却是空白 | 已修复：`tool-loop` 原先无视前端 `stream` 标志一律返回 JSON，而前端流式分支（尤其 OpenAI 协议）只认 `data:` 开头的 SSE 行，整段回复被丢弃。现按 `stream` 分别返回 SSE / JSON |
-| 设置里开了开关，实际却没带 tools | 已修复：`session.config` 是切换模型时用 `{ ...settings }` 拍的快照，会把当时的 `enableTools` 一起冻住，反过来静默压掉全局开关。现工具开关只读全局 `settings` |
+| 设置里开了开关，实际却没带 tools | 已修复：`session.config` 是切换模型时用 `{ ...settings }` 拍的快照，会把当时的 `enableTools` 一起冻住，反过来静默压掉开关。现工具开关只读**当前工作区的 `settings`**、不读会话快照（注意：这里的「当前工作区 settings」仍是按窗口隔离的，不是跨工作区全局 —— 见上方「开关是按工作区隔离的」） |
 
 相关实现：`server/tool-loop.js`（编排层）、`server/index.js` 的 `/api/plugin-chat` 中的 `enableTools` 分支、`src/api/llm.js` 的 `proxyPayload`。
 
