@@ -52,6 +52,9 @@ const DEFAULTS = {
   maxTokens: 0,
   // 👇 流式输出开关：true = 逐字流式返回；false = 等待完整回复一次性显示
   stream: true,
+  // 👇 工具调用（Function Calling）开关：开启后模型可自主调用已启用的 EXE 插件（如 AdShield）
+  // 关闭时走原有对话逻辑，模型不知道任何工具的存在
+  enableTools: false,
 }
 
 export const settings = reactive({ ...DEFAULTS })

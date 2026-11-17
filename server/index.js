@@ -57,6 +57,8 @@ const { getKV, setKV } = require('./db')
 const { createLocalPythonRouter } = require('./routes/local-python')
 // EXE 插件扫描：与 JS 插件分流，避免两类产物混在同一个列表里
 const { isExePluginEntry, isStandaloneExeFile, scanExePlugins } = require('./routes/exe-plugins')
+// Function Calling 编排层：把模型的 tool_calls 翻译成真实工具调用 + 结果回灌
+const { runToolLoop } = require('./tool-loop')
 
 const app = express()
 app.use(cors())
@@ -506,7 +508,7 @@ app.get(['/api/tags', '/api/api/tags', '/api/v1/models'], async (req, res) => {
 })
 
 app.post('/api/plugin-chat', async (req, res) => {
-  let { messages, targetUrl, targetHeaders, proxyUrl, ...restPayload } = req.body
+  let { messages, targetUrl, targetHeaders, proxyUrl, enableTools, ...restPayload } = req.body
   let directReply = null
 
   for (const p of installedPlugins) {
@@ -562,6 +564,33 @@ app.post('/api/plugin-chat', async (req, res) => {
   let finalTargetUrl = targetUrl
   if (targetUrl.startsWith('/api')) {
     finalTargetUrl = targetUrl.replace(/^\/api/, 'http://127.0.0.1:11434')
+  }
+
+  // ============================================================
+  // Function Calling 分支：前端显式开启（设置面板开关）才进入。
+  // 未开启时走下方原有透传逻辑，行为与之前完全一致。
+  // ============================================================
+  if (enableTools === true) {
+    try {
+      const isOpenAI = !!(targetUrl && targetUrl.includes('/v1/chat/completions'))
+      return await runToolLoop({
+        res,
+        messages,
+        restPayload,
+        finalTargetUrl,
+        targetHeaders,
+        proxyUrl,
+        buildProxyAgent,
+        isOpenAI,
+        port: PORT,
+      })
+    } catch (err) {
+      console.error('[tool-loop] 编排失败:', err)
+      if (!res.headersSent) {
+        return res.status(500).json({ error: `工具调用编排失败：${err.message}` })
+      }
+      return
+    }
   }
 
   try {

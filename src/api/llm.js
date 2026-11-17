@@ -126,6 +126,20 @@ export async function streamChat({ messages, signal, onDelta, sessionConfig }) {
     ? { ...settings, ...sessionConfig } 
     : settings
 
+  // ============================================================
+  // 工具开关只认「全局设置」，不看会话快照。
+  //
+  // 为什么：session.config 是「当前会话绑定哪个模型服务」的快照，
+  // 由 Composer.applyModel / ChatHeader.changeApiPreset 用 { ...settings } 整个拷贝出来的。
+  // 那份拷贝会把当时的 enableTools 一起冻进去，于是出现：
+  //   用户先切了模型 → 之后去设置里打开「工具调用 Tools」→
+  //   设置面板显示已开启，但这里 { ...settings, ...sessionConfig } 又被快照里的 false 盖回去，
+  //   请求永远不带 tools，模型只能凭自己的知识编造激活码。
+  //
+  // 工具开关是「功能开关」而非「服务配置」，语义上就应该跟随全局，跨会话共享。
+  // ============================================================
+  const enableTools = settings.enableTools === true
+
   const openai = activeSettings.protocol === 'openai'
   const temperature = clamp(activeSettings.temperature, 0, 2)
   // 👇 高级生成参数：流式开关（默认开）与最大输出 Token（0 = 不限制）
@@ -157,6 +171,9 @@ export async function streamChat({ messages, signal, onDelta, sessionConfig }) {
     targetHeaders: headers,
     // 网络代理是全局设置：由后端 axios 在转发时挂 HttpsProxyAgent
     proxyUrl: String(activeSettings.proxyUrl ?? '').trim(),
+    // 工具调用开关：仅交给后端编排层，不进入发给模型的 payload
+    // 只读全局 settings，避免被 session.config 里的旧快照静默压掉（见上方说明）
+    enableTools,
   }
 
   let response

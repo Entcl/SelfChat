@@ -57,3 +57,5 @@ python-service/*.pyc
 
 # PyInstaller 编译的 EXE 插件产物
 server/plugins/adshield_exe/
+
+.workbuddy/

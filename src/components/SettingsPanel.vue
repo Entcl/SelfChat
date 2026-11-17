@@ -776,6 +776,16 @@ onBeforeUnmount(clearAutoFetchTimer)
                           <span class="slider"></span>
                         </label>
                       </div>
+                      <div class="adv-row">
+                        <div>
+                          <p class="adv-title">工具调用 Tools <span class="value-pill">实验</span></p>
+                          <p class="adv-sub">开启后模型可自主调用已启用的 EXE 插件（如 AdShield）。需模型支持 tools，如 qwen2.5 / qwen3</p>
+                        </div>
+                        <label class="toggle-switch">
+                          <input type="checkbox" :checked="settings.enableTools === true" @change="settings.enableTools = $event.target.checked" />
+                          <span class="slider"></span>
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>

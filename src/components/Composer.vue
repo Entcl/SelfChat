@@ -38,7 +38,18 @@ const availableModels = computed(() => {
 // 切换具体模型
 function applyModel(modelName) {
   if (!activeSession.value) return
-  const baseConfig = activeSession.value.config || { ...settings }
+  // 只快照「模型服务」相关字段。
+  // 早期这里写的是 { ...settings }，会把 enableTools / stream 这类功能开关
+  // 一起冻进会话快照，之后用户在设置里改开关就被这份旧快照静默覆盖。
+  const prev = activeSession.value.config
+  const baseConfig = prev
+    ? { ...prev }
+    : {
+        protocol: settings.protocol,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+      }
   updateSessionConfig(activeSession.value.id, { ...baseConfig, model: modelName })
   dropdownOpen.value = false
   toast.success(`已切换至: ${modelName}`)
