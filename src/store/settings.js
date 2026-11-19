@@ -89,6 +89,16 @@ export function chatUrlPreview(config) {
 }
 
 let saveTimer = null
+
+/** 立即落盘（跳过防抖），供窗口关闭前调用 */
+function flushSettings() {
+  if (!isReady) return
+  clearTimeout(saveTimer)
+  saveTimer = null
+  const { models, ...persisted } = settings
+  saveJSON(STORAGE_KEY, persisted)
+}
+
 watch(
   settings,
   () => {
@@ -101,6 +111,20 @@ watch(
   },
   { deep: true },
 )
+
+/**
+ * 关闭 / 隐藏窗口前兜底保存。
+ *
+ * 为什么必须有：设置走 300ms 防抖，如果用户拨完开关立刻关窗口，
+ * 定时器可能还没触发，这一次改动就丢了 —— 表现是「明明开了，下次打开又是关的」。
+ * chat.js / user.js 都已经挂了同样的兜底，settings 之前漏了。
+ */
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => { flushSettings() })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSettings()
+  })
+}
 
 export function resetSettings() {
   Object.assign(settings, { ...DEFAULTS, models: settings.models })

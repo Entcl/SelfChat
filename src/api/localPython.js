@@ -79,7 +79,19 @@ export async function checkPythonHealth({ signal } = {}) {
       return {
         alive: false,
         degraded: true,
+        disabled: false,
         message: data.error || '插件文件已损坏（大小为 0），请重新安装',
+        plugin: data.plugin || null,
+      }
+    }
+
+    // 用户主动禁用：文件通常完好，只是开关关着
+    if (data.code === 'PLUGIN_DISABLED') {
+      return {
+        alive: false,
+        degraded: false,
+        disabled: true,
+        message: data.error || '插件未启用，请在「设置 → 插件管理 → EXE 插件」中启用',
         plugin: data.plugin || null,
       }
     }
@@ -89,6 +101,7 @@ export async function checkPythonHealth({ signal } = {}) {
       return {
         alive: false,
         degraded: false,
+        disabled: false,
         message: data.error || '插件未找到，请重新安装',
         plugin: data.plugin || null,
       }
@@ -97,6 +110,7 @@ export async function checkPythonHealth({ signal } = {}) {
     return {
       alive: true,
       degraded: false,
+      disabled: false,
       message: '插件已就绪',
       plugin: data.plugin,
     }
@@ -105,6 +119,7 @@ export async function checkPythonHealth({ signal } = {}) {
     return {
       alive: false,
       degraded: false,
+      disabled: false,
       message: friendly.message,
       plugin: null,
     }
@@ -161,6 +176,7 @@ export async function generateActivationCode(keyword, { signal } = {}) {
 export const PLUGIN_ERROR_CODES = Object.freeze([
   'PLUGIN_NOT_FOUND',
   'PLUGIN_EMPTY',
+  'PLUGIN_DISABLED',
   'PLUGIN_SPAWN_FAILED',
   'PLUGIN_TIMEOUT',
   'PLUGIN_OUTPUT_TOO_LARGE',

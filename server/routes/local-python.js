@@ -19,6 +19,8 @@ const express = require('express')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
+// 插件启用状态的唯一权威判据（与设置面板里那个开关共用同一份 plugins_config.json）
+const { isPluginEnabled } = require('./exe-plugins')
 
 // ============================================================
 // 一、可配置项
@@ -87,6 +89,60 @@ function pluginRoots() {
 
 /** exe 基名，不含扩展名（onefile 的备用名 / 日志用） */
 const EXE_BASE = EXE_NAME.replace(/\.exe$/i, '')
+
+// ============================================================
+// 一·五、插件启用状态（与设置面板共用 plugins_config.json）
+// ============================================================
+/**
+ * 推导 userData 目录（与上面 pluginRoots 里那段逻辑保持一致）。
+ * 单独抽出来是因为读取配置也需要同一个目录。
+ */
+function resolveUserDataDir() {
+  try {
+    const { app } = require('electron')
+    if (app && typeof app.getPath === 'function') return app.getPath('userData')
+  } catch {
+    // 非 Electron 环境（直接用 node 起 server）走兜底
+  }
+  return path.join(__dirname, '..')
+}
+
+/**
+ * 读取 plugins_config.json。
+ *
+ * ⚠️ 必须每次实时读盘，不能缓存：
+ * 用户在设置面板里拨动开关会立刻写这个文件，如果这里缓存了旧值，
+ * 就会出现「已经禁用了，却还能调用」—— 正是本次要修的那个 bug。
+ *
+ * 读不到/解析失败时返回空对象（等价于「全部未启用」），安全侧默认关闭。
+ */
+function readPluginConfig() {
+  try {
+    const file = path.join(resolveUserDataDir(), 'plugins_config.json')
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) || {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 判断 AdShield 插件当前是否启用。
+ *
+ * 注意配置的 key 用的是「插件 id = 目录名」。老安装里目录可能叫 AdShield，
+ * 现行约定是 adshield_exe，所以这里按候选名依次查，任意一个被显式启用即放行。
+ *
+ * @returns {{ enabled: boolean, id: string|null }}
+ */
+function checkAdshieldEnabled() {
+  const config = readPluginConfig()
+  const candidates = [PLUGIN_DIR_NAME, ...LEGACY_DIR_NAMES]
+
+  for (const id of candidates) {
+    if (isPluginEnabled(config, id)) return { enabled: true, id }
+  }
+  // 都没启用：返回第一个候选名，供错误提示显示
+  return { enabled: false, id: candidates[0] || null }
+}
 
 /**
  * 列出所有候选 exe 路径，按优先级从高到低。
@@ -459,6 +515,20 @@ function createLocalPythonRouter() {
     }
     const keyword = check.value
 
+    // 0) 先看插件是否被用户禁用。
+    // 这一步必须在「exe 在不在」「能不能跑」之前，因为它表达的是用户意图：
+    // 用户在设置面板里关掉开关，就是不希望这个能力被使用 ——
+    // 不管调用方是面板按钮还是模型自动调工具，都必须拦住。
+    const gate = checkAdshieldEnabled()
+    if (!gate.enabled) {
+      console.warn(`[adshield] 插件已被禁用，拒绝调用 keyword=%j`, keyword)
+      return res.status(403).json({
+        error: '插件未启用，无法生成激活码。请在「设置 → 插件管理 → EXE 插件」中启用 AdShield 后重试',
+        code: 'PLUGIN_DISABLED',
+        plugin_id: gate.id,
+      })
+    }
+
     // 1) 先确认 exe 在不在
     const resolved = resolveExe()
     if (!resolved.found) {
@@ -557,6 +627,27 @@ function createLocalPythonRouter() {
    */
   router.get('/health', (_req, res) => {
     const resolved = resolveExe()
+    const gate = checkAdshieldEnabled()
+
+    // 用户主动禁用：即使文件完好，也要如实报告「未启用」。
+    // 否则面板会亮绿灯显示「已就绪」，和卡片上的「已禁用」自相矛盾。
+    if (!gate.enabled) {
+      return res.status(200).json({
+        reachable: false,
+        code: 'PLUGIN_DISABLED',
+        error: '插件未启用，请在「设置 → 插件管理 → EXE 插件」中启用',
+        plugin: {
+          found: resolved.found,
+          empty: false,
+          enabled: false,
+          name: EXE_NAME,
+          path: resolved.exePath,
+          size: resolved.size,
+          mtime_ms: resolved.mtimeMs,
+          size_human: formatBytes(resolved.size),
+        },
+      })
+    }
 
     // 文件在但大小为 0：安装损坏，算「半可用」
     if (resolved.found && resolved.size === 0) {
@@ -633,6 +724,7 @@ module.exports = {
   createLocalPythonRouter,
   // 导出这些方便单测 / 排查
   resolveExe,
+  checkAdshieldEnabled,
   EXE_NAME,
   EXE_TIMEOUT_MS,
 }

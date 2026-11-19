@@ -23,8 +23,9 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 
 // ---------------------------------------------------------------- 状态灯
-// 'checking' | 'alive' | 'degraded' | 'down'
-//   alive    : exe 存在且非空 → 绿点
+// 'checking' | 'alive' | 'disabled' | 'degraded' | 'down'
+//   alive    : 插件已启用且 exe 存在 → 绿点
+//   disabled : 用户主动关掉了开关 → 灰点（不是故障，别用红色吓人）
 //   degraded : exe 存在但 0 字节（安装损坏）→ 黄点
 //   down     : exe 不存在 → 红点
 const healthState = ref('checking')
@@ -36,6 +37,7 @@ const pluginInfo = ref(null)
 const healthDotClass = computed(() => `is-${healthState.value}`)
 const healthLabel = computed(() => {
   if (healthState.value === 'alive') return '插件已就绪'
+  if (healthState.value === 'disabled') return '插件未启用'
   if (healthState.value === 'degraded') return '插件已损坏'
   if (healthState.value === 'down') return '插件未找到'
   return '检测中…'
@@ -52,6 +54,9 @@ async function refreshHealth() {
     if (result.alive) {
       healthState.value = 'alive'
       healthMessage.value = '插件已就绪'
+    } else if (result.disabled) {
+      healthState.value = 'disabled'
+      healthMessage.value = result.message
     } else if (result.degraded) {
       healthState.value = 'degraded'
       healthMessage.value = result.message
@@ -86,7 +91,10 @@ const errorText = ref('')
 const copied = ref(false)
 
 // 输入是否合法：非空即可（真正的 8 位校验交给 exe 内部，这里只做轻提示）
-const canSubmit = computed(() => keyword.value.trim().length > 0 && !loading.value)
+// 插件被禁用时直接锁死按钮：不让用户点了才看到错误，前端就把意图表达清楚。
+const canSubmit = computed(
+  () => keyword.value.trim().length > 0 && !loading.value && healthState.value !== 'disabled',
+)
 
 // 轻量防抖：同一输入在 400ms 内重复点击直接忽略
 let lastSubmitAt = 0
@@ -117,6 +125,10 @@ async function onSubmit() {
       healthState.value = 'down'
       healthMessage.value = err.message
       pluginInfo.value = null
+    } else if (err.code === 'PLUGIN_DISABLED') {
+      // 用户把开关关掉了：这是「未启用」而非故障，用灰色状态点
+      healthState.value = 'disabled'
+      healthMessage.value = err.message
     } else if (err.code === 'PLUGIN_EMPTY') {
       healthState.value = 'degraded'
       healthMessage.value = err.message
@@ -265,6 +277,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEsc, true))
             <div v-else-if="healthState === 'degraded'" class="install-tip is-warn">
               <AppIcon name="alert" :size="13" />
               <span>插件文件存在但内容为空，通常是被中断的复制或下载。请重新放置一份完整的 exe。</span>
+            </div>
+            <div v-else-if="healthState === 'disabled'" class="install-tip is-off">
+              <AppIcon name="alert" :size="13" />
+              <span>
+                该插件已被禁用，生成功能不可用。请到
+                <strong>「设置 → 插件管理 → EXE 插件」</strong> 打开 <code>adshield_exe</code> 的开关后重试。
+              </span>
             </div>
 
             <!-- ===== 输入区 ===== -->
@@ -491,6 +510,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEsc, true))
 .health-bar.is-alive { border-color: rgba(52, 211, 153, 0.32); background: rgba(52, 211, 153, 0.07); }
 .health-bar.is-down { border-color: rgba(251, 113, 133, 0.32); background: rgba(251, 113, 133, 0.07); }
 .health-bar.is-degraded { border-color: rgba(251, 191, 36, 0.32); background: rgba(251, 191, 36, 0.07); }
+.health-bar.is-disabled { border-color: rgba(148, 163, 184, 0.28); background: rgba(148, 163, 184, 0.07); }
 
 /* 呼吸点 */
 .dot {
@@ -516,6 +536,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEsc, true))
   background: #fbbf24;
   box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.16), 0 0 10px rgba(251, 191, 36, 0.6);
   animation: breathe 1.8s ease-in-out infinite;
+}
+/* 未启用：静态灰点，不呼吸 —— 它不是需要被关注的状态，只是开关关着 */
+.dot.is-disabled {
+  background: #94a3b8;
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.14);
 }
 .dot.is-checking { background: var(--faint); }
 .dot-pulse {
@@ -566,8 +591,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEsc, true))
   background: rgba(251, 191, 36, 0.08);
   border-color: rgba(251, 191, 36, 0.22);
 }
+/* 未启用：中性灰，表示「你没开」而不是「坏了」，不制造焦虑 */
+.install-tip.is-off {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.24);
+  color: var(--muted);
+}
 .install-tip :deep(svg) { flex: none; margin-top: 1px; color: #fb7185; }
 .install-tip.is-warn :deep(svg) { color: #fbbf24; }
+.install-tip.is-off :deep(svg) { color: #94a3b8; }
+.install-tip strong { color: var(--text-strong); font-weight: 600; }
 .install-tip code {
   font-family: var(--font-mono);
   font-size: 10.5px;

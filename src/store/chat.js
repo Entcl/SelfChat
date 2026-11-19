@@ -70,6 +70,9 @@ function serializeSession(session) {
     pinned: Boolean(session.pinned),
     providerType: session.providerType === 'api' ? 'api' : 'local',
     config: session.config || null,
+    // 👈 工具调用开关是「会话级」的：每个对话各自记住开没开，
+    //    这样「工具鱼」开着、「非工具鱼」关着，互不影响。
+    enableTools: session.enableTools === true,
     messages: session.messages.map((message) => {
       const { streaming, ...rest } = message
       return rest
@@ -110,6 +113,10 @@ function normalizeSession(raw) {
     // 历史数据没有这个字段：一律视为本地对话，避免老记录在云端窗口里「复活」
     providerType: raw?.providerType === 'api' ? 'api' : 'local',
     config: raw?.config || null,
+    // 工具调用开关（会话级）。老会话没有这个字段时，回落到窗口级设置，
+    // 保证升级后原先能用的会话不会突然用不了工具。
+    enableTools:
+      typeof raw?.enableTools === 'boolean' ? raw.enableTools : settings.enableTools === true,
     messages: Array.isArray(raw?.messages)
       ? raw.messages
           .filter((message) => message && typeof message.content === 'string')
@@ -167,6 +174,9 @@ export function createSession({ greeting = false, activate = true, silent = fals
     // 👈 打上归属标记：此后它只会出现在同一服务类型的窗口/模式里
     providerType: sessionListProviderType.value,
     config: null,
+    // 新建会话的工具调用开关：继承当前窗口的设置当默认值，
+    // 之后这个会话自己独立持有，改别的会话不会影响它。
+    enableTools: settings.enableTools === true,
     messages: [],
   }
 
@@ -194,6 +204,24 @@ export function updateSessionConfig(id, config) {
     session.updatedAt = Date.now()
     persistSoon()
   }
+}
+
+/**
+ * 设置某个会话的「工具调用 Tools」开关。
+ *
+ * 这是**会话级**设置：只影响这一个对话，同窗口里的其它会话不受影响。
+ * 用户在设置面板里拨动开关时，作用于当前激活的会话。
+ *
+ * @param {string} id    会话 id
+ * @param {boolean} val  是否启用
+ */
+export function setSessionEnableTools(id, val) {
+  const session = chat.sessions.find((s) => s.id === id)
+  if (!session) return false
+  session.enableTools = val === true
+  session.updatedAt = Date.now()
+  persistSoon()
+  return true
 }
 
 export function selectSession(id) {
@@ -330,6 +358,9 @@ async function runCompletion() {
       messages: payload,
       signal: abortController.signal,
       sessionConfig: session.config,
+      // 👈 工具调用开关按「会话」传，不按窗口传：
+      //    这样同一窗口里「工具鱼」开着、「非工具鱼」关着，互不影响。
+      sessionEnableTools: session.enableTools === true,
       onDelta(delta) {
         assistant.content += delta
       },

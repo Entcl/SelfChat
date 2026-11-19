@@ -121,24 +121,26 @@ export async function listModels(customConfig) {
   return (data.models || []).map((item) => item?.name).filter(Boolean).sort()
 }
 
-export async function streamChat({ messages, signal, onDelta, sessionConfig }) {
+export async function streamChat({ messages, signal, onDelta, sessionConfig, sessionEnableTools }) {
   const activeSettings = sessionConfig 
     ? { ...settings, ...sessionConfig } 
     : settings
 
   // ============================================================
-  // 工具开关只认「全局设置」，不看会话快照。
+  // 工具开关是「会话级」的：由调用方传入当前会话自己的开关值。
   //
-  // 为什么：session.config 是「当前会话绑定哪个模型服务」的快照，
-  // 由 Composer.applyModel / ChatHeader.changeApiPreset 用 { ...settings } 整个拷贝出来的。
-  // 那份拷贝会把当时的 enableTools 一起冻进去，于是出现：
-  //   用户先切了模型 → 之后去设置里打开「工具调用 Tools」→
-  //   设置面板显示已开启，但这里 { ...settings, ...sessionConfig } 又被快照里的 false 盖回去，
-  //   请求永远不带 tools，模型只能凭自己的知识编造激活码。
+  // 历史演变（三次，别再来回改）：
+  //   1) 曾读 `{ ...settings, ...sessionConfig }` —— 被模型快照里的旧 enableTools 冻住，
+  //      开关开了也不生效。
+  //   2) 曾改成只读窗口级 settings.enableTools —— 又变成「同窗口所有会话共用」，
+  //      用户关掉一个会话的开关，另一个会话也跟着关。
+  //   3) 现在：以会话自己的 `session.enableTools` 为准（见 store/chat.js）。
+  //      只有调用方没传（老代码路径）时，才回落到窗口级 settings。
   //
-  // 工具开关是「功能开关」而非「服务配置」，语义上就应该跟随全局，跨会话共享。
+  // 注意不能用 sessionConfig 里的值 —— 那是「模型服务」快照，不承载功能开关。
   // ============================================================
-  const enableTools = settings.enableTools === true
+  const enableTools =
+    typeof sessionEnableTools === 'boolean' ? sessionEnableTools : settings.enableTools === true
 
   const openai = activeSettings.protocol === 'openai'
   const temperature = clamp(activeSettings.temperature, 0, 2)

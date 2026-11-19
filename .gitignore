@@ -59,3 +59,6 @@ python-service/*.pyc
 server/plugins/adshield_exe/
 
 .workbuddy/
+
+DirectoryStructure.md
+Target.md

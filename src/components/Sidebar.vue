@@ -196,6 +196,14 @@ onMounted(() => {})
         <AppIcon name="plus" :size="16" />
         新建对话
       </button>
+      <!--
+        ⛔ 「新建窗口」入口已停用（用户不使用多窗口功能）。
+        只是隐藏 UI：底层多工作区机制（wN:: 前缀、分区隔离）仍然完好，
+        现有 w1 / w2 的数据归属不受影响。
+
+        需要恢复时：把下面这段注释放开即可，同时放开脚本区的
+        canOpenWindow / openNewWindow 与 import 里的 hasWorkspace / workspaceId。
+
       <button
         v-if="canOpenWindow"
         type="button"
@@ -205,13 +213,18 @@ onMounted(() => {})
       >
         <AppIcon name="window" :size="17" />
       </button>
+      -->
     </div>
 
-    <!-- 当前窗口是哪个工作区：多窗口并存时用户需要一眼分清 -->
+    <!--
+      ⛔ 「工作区 #N」标签已停用（只在多窗口时才有意义）。
+      恢复时连同上方「新建窗口」一起放开，并保留 canOpenWindow 判断。
+
     <div v-if="canOpenWindow" class="workspace-tag" :title="`当前窗口独立工作区：${workspaceId}`">
       <span class="ws-dot"></span>
       工作区 #{{ workspaceLabel }}
     </div>
+    -->
 
     <div class="search-box">
       <AppIcon name="search" :size="14" class="search-icon" />
@@ -345,9 +358,11 @@ onMounted(() => {})
 .sidebar-actions { padding: 16px 14px 8px; display: flex; align-items: center; gap: 8px; }
 .new-chat-btn { flex: 1 1 auto; min-width: 0; height: 36px; justify-content: center; border-radius: 10px; font-size: 13px; }
 /* 新建窗口：与主按钮同一行，视觉上明显次要 */
+/* ⛔ 配套样式：对应模板里已注释的「新建窗口」按钮，恢复入口时一并生效 */
 .new-window-btn { flex: none; width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--glass-border); color: var(--muted); }
 .new-window-btn:hover { color: var(--accent-2); border-color: rgba(34, 211, 238, 0.42); background: rgba(34, 211, 238, 0.1); }
 /* 工作区标识：常驻小字，提醒用户当前窗口的数据是独立的一份 */
+/* ⛔ 配套样式：对应模板里已注释的「工作区 #N」标签 */
 .workspace-tag { display: flex; align-items: center; gap: 6px; margin: 0 14px 10px; padding: 0 8px; height: 22px; font-size: 10.5px; font-weight: 600; color: var(--faint); letter-spacing: 0.02em; }
 .ws-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.14); }
 .search-box { position: relative; display: flex; align-items: center; margin: 8px 14px 12px; padding: 0 10px; height: 32px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; transition: border-color 0.2s; }

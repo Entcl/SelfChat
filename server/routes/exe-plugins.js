@@ -353,6 +353,30 @@ function scoreOf(item, root) {
   return score
 }
 
+/**
+ * 判定某个 EXE 插件当前是否「已启用」。
+ *
+ * 这是「插件开关」的唯一权威判据，前端 UI、面板调用、工具调用都必须用它，
+ * 否则会出现「卡片上写着已禁用，实际却照样能生成激活码」这种自相矛盾的状态。
+ *
+ * 配置兼容三种历史形态（读 plugins_config.json）：
+ *   - 布尔值 true/false        —— 最早期的裸开关
+ *   - { enabled: boolean }     —— 现行结构（可带 alias 等其它字段）
+ *   - 缺失 / 无法解析          —— 视为未启用（默认关闭，避免误放行）
+ *
+ * @param {object} configMap plugins_config.json 的内容
+ * @param {string} id        插件 id（目录名，如 adshield_exe）
+ * @returns {boolean}
+ */
+function isPluginEnabled(configMap, id) {
+  if (!configMap || !id) return false
+  const saved = configMap[id]
+
+  if (typeof saved === 'boolean') return saved
+  if (saved && typeof saved === 'object') return Boolean(saved.enabled)
+  return false
+}
+
 module.exports = {
   isExePluginEntry,
   isStandaloneExeFile,
@@ -363,5 +387,6 @@ module.exports = {
   computeSize,
   formatBytes,
   guessExeKind,
+  isPluginEnabled,
   PYINSTALLER_INTERNAL_DIR,
 }

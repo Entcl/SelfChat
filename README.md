@@ -7,6 +7,20 @@
 
 ---
 
+## 📚 文档导航
+
+| 文档 | 用途 |
+| --- | --- |
+| `README.md` | 本文件：项目主文档（特性、架构、快速开始、插件开发指南） |
+| `README-adshield.md` | EXE 插件打包完整指南 |
+| [`DirectoryStructure.md`](./DirectoryStructure.md) | **说明本项目的文件与目录结构**：逐层介绍 `electron/`、`src/`、`server/`、`python-service/` 等目录的职责、关键文件作用与运行时数据位置，帮助快速定位代码。**新人接手或排查问题时，建议先读它与 `README.md`，即可掌握全项目文件清单，无需逐个翻源码。** |
+| [`Target.md`](./Target.md) | **说明项目 / 任务目标**：描述产品定位、总体与功能目标、当前工作重点（Function Calling 工具调用链路）及边界，帮助理解"要做什么、为什么做"。**开始任何改动前应先在 `Target.md` 写明任务清单，完成一项就记一条执行记录，便于验证。** |
+
+> 读写约定：`DirectoryStructure.md` 负责「有什么文件」，`Target.md` 负责「要做什么 / 做到哪一步」。
+> 两者配合，可在不预读全部源码的前提下快速建立项目认知。
+
+---
+
 ## ✨ 核心特性
 
 ### 🎨 界面与体验
@@ -23,13 +37,19 @@
 - 支持网络代理（仅 https 目标经 `HttpsProxyAgent` 转发，http 本地服务直连），模型列表由后端代取并带 SSRF 白名单防护。
 - 快捷操作（重新生成、编辑并重发、复制、删除）。
 - 系统提示词预设（简洁模式、代码助手、翻译润色）。
-- **工具调用（Function Calling，实验）**：设置 → 高级生成参数 → 打开「工具调用 Tools」后，模型可自主调用已启用的 EXE 插件（如 AdShield）——在聊天里直接说「算一下设备 AD056FA2 的激活码」，模型会输出 `tool_calls`，后端自动 `spawn` 对应插件并把结果回灌给模型生成回复。**需模型支持 tools**（如 `qwen2.5` / `qwen3`，可用 `ollama show <模型>` 看 `capabilities` 是否含 `tools`）；关闭时模型完全不知道工具有存在，走原有对话逻辑。详见 [工具调用与工作区](#-工具调用与工作区)。
+- **工具调用（Function Calling，实验）**：设置 → 高级生成参数 → 打开「工具调用 Tools」后，模型可自主调用已启用的 EXE 插件（如 AdShield）——在聊天里直接说「算一下设备 AD056FA2 的激活码」，模型会输出 `tool_calls`，后端自动 `spawn` 对应插件并把结果回灌给模型生成回复。**需模型支持 tools**（如 `qwen2.5` / `qwen3`，可用 `ollama show <模型>` 看 `capabilities` 是否含 `tools`）；关闭时模型完全不知道工具有存在，走原有对话逻辑。详见 [工具调用](#-工具调用function-calling)。
 
-### 🖥️ 桌面与多工作区
-- **多窗口 = 多工作区**：每个窗口对应一个稳定的 `w1` / `w2`… id 和独立 `persist:window-*` 分区，localStorage / IndexedDB / Cookie 物理隔离，互不串数据；重启自动恢复上次打开的窗口数。
-- 单实例锁：再次双击图标不会多起进程，而是在同一进程内新开一个隔离窗口。
+### 🖥️ 桌面与工作区
+
+> ℹ️ **当前版本已停用多窗口的界面入口**：侧边栏不再显示「新建窗口」按钮与「工作区 #N」标签。
+> 底层多工作区机制（`wN::` 存储前缀、`persist:window-*` 分区）仍然完好，现有 `w1` / `w2` 数据归属不受影响。
+> 恢复方式见 `DirectoryStructure.md` 与 `Target.md` 的对应说明。
+
+- **多窗口 = 多工作区**（底层能力，界面入口已隐藏）：每个窗口对应一个稳定的 `w1` / `w2`… id 和独立 `persist:window-*` 分区，localStorage / IndexedDB / Cookie 物理隔离，互不串数据。
+- 单实例锁：再次双击图标不会多起进程，而是在同一进程内新开一个隔离窗口（该行为仍在）。
 - 安全基线：`nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`，渲染进程只通过 `preload.js` 的白名单 API 访问 KV 存储与窗口控制。
-- ⚠️ **设置按工作区隔离**：包括「工具调用 Tools」在内的所有设置都按窗口各存一份（键为 `wN::sc.settings.v1`），**不是全局共享**。在某个窗口打开开关，其它窗口不受影响。
+- ⚠️ **设置按工作区隔离**：所有设置按窗口各存一份（键为 `wN::sc.settings.v1`），**不是全局共享**。
+  其中「工具调用 Tools」更进一步到**会话级**：同一窗口里的不同对话也各管各的（见下方「开关是按会话隔离的」）。
 
 ### 🔌 插件系统 (重大升级)
 应用里有**两套互不干扰**的插件通道：
@@ -52,7 +72,7 @@
 ### 🗄️ 数据持久化
 - 抛弃浏览器限制，全面接入本地 SQLite 数据库（`better-sqlite3`，单表 `kv_store` KV 存储）。
 - 自动无缝迁移旧版 localStorage 历史数据，不怕清缓存，拒绝数据丢失；升级后旧的无命名空间数据也会自动收编到当前工作区。
-- 桌面版数据目录为 `%APPDATA%\SelfChat\`（`app.getPath('userData')`），数据库、插件、插件配置都在这里，`release/` 打包时不会带走任何用户数据。
+- 桌面版数据目录为 `%APPDATA%\s-c\`（`app.getPath('userData')`），数据库、插件、插件配置都在这里，`release/` 打包时不会带走任何用户数据。
 
 ---
 
@@ -157,7 +177,7 @@ npm run electron:build
 - `win-unpacked/SelfChat.exe` —— 免安装目录
 
 打包配置集中在 `package.json` 的 `build` 字段（`appId`、`asarUnpack`、`files` 白名单、`win.target`、`nsis`、`portable`）。
-**若要把 EXE 插件一起分发，打包前先把它放进 `server/plugins/`**（见下一节），否则安装版用户需要手动复制到 `%APPDATA%\SelfChat\plugins\`。
+**若要把 EXE 插件一起分发，打包前先把它放进 `server/plugins/`**（见下一节），否则安装版用户需要手动复制到 `%APPDATA%\s-c\plugins\`。
 
 ---
 
@@ -369,11 +389,11 @@ server/plugins/adshield_exe/
 **查找位置按优先级（命中第一个就停）：**
 
 1. `%SELFCHAT_ADSHIELD_DIR%`（环境变量，调试用）
-2. `%APPDATA%\SelfChat\plugins\`（**已安装版 SelfChat.exe 的运行时目录**）
+2. `%APPDATA%\s-c\plugins\`（**已安装版 SelfChat.exe 的运行时目录**）
 3. `<项目>\server\plugins\`（开发期）
 
 > `server/index.js` 启动时会把 `server/plugins/*` 递归复制到 `userData/plugins/*`，所以开发期放这里，打包运行时会自动出现。
-> ⚠️ 复制逻辑是「**目标不存在才复制**」（`if (!fs.existsSync(destPath))`）——换了新版 exe 没生效，就手动删掉 `%APPDATA%\SelfChat\plugins\adshield_exe` 再重启。旧目录名 `AdShield\` 也建议删掉，避免占空间和困惑。
+> ⚠️ 复制逻辑是「**目标不存在才复制**」（`if (!fs.existsSync(destPath))`）——换了新版 exe 没生效，就手动删掉 `%APPDATA%\s-c\plugins\adshield_exe` 再重启。旧目录名 `AdShield\` 也建议删掉，避免占空间和困惑。
 
 ### 8.8 Step 6 · 自检 + 使用
 
@@ -415,7 +435,7 @@ if (Test-Path $pluginDir) { Remove-Item $pluginDir -Recurse -Force }
 New-Item -ItemType Directory -Force $pluginDir | Out-Null
 Copy-Item "$final\*" $pluginDir -Recurse -Force
 Write-Host "完成：$pluginDir\AdShield.exe"
-Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield_exe\'
+Write-Host '安装版用户还需复制到：%APPDATA%\s-c\plugins\adshield_exe\'
 ```
 
 执行：`powershell -ExecutionPolicy Bypass -File .\build-exe.ps1`
@@ -424,7 +444,7 @@ Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield
 
 1. **改了业务 `.py` 必须重新打包**。exe 是把 Python 代码和解释器一起封进去的静态产物，改源码不会影响已生成的 exe。
 2. **换了 exe 不生效就删缓存目录**。应用「目标不存在才复制」，旧文件不会被覆盖。
-3. **打包后要分发给用户，就把整个 `adshield_exe\` 目录放进 `%APPDATA%\SelfChat\plugins\adshield_exe\``，或在 `npm run electron:build` 之前放进 `server\plugins\` 一起打进安装包。
+3. **打包后要分发给用户，就把整个 `adshield_exe\` 目录放进 `%APPDATA%\s-c\plugins\adshield_exe\``，或在 `npm run electron:build` 之前放进 `server\plugins\` 一起打进安装包。
 
 ### 8.11 想接入第二个 / 多个脚本怎么办
 
@@ -454,7 +474,7 @@ Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield
 
 ---
 
-## 🛠️ 工具调用与工作区
+## 🛠️ 工具调用（Function Calling）
 
 ### 它是什么
 
@@ -471,29 +491,38 @@ Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield
 
 关掉开关时走原有逻辑：请求不带 tools 定义，模型不知道工具存在，只会「凭知识编造」答案（例如把激活码编成 `XXXX-XXXX-XXXX` 格式）。**判断工具有没有真跑，看结果格式**：真实激活码是 `时间戳-8位十六进制`（如 `1802656925-C068FE02`），其它格式都是模型编的。
 
-### 开关是按工作区隔离的（重要）
+### 开关是按会话隔离的（重要）
 
-「工具调用 Tools」开关和项目里其它设置一样，**按窗口各自保存**，不是全局开关：
+「工具调用 Tools」开关**按会话（每个对话）各自保存**，不是全局开关，也不是窗口开关：
 
-- 存储键是 `wN::sc.settings.v1`（`N` = 工作区编号），字段 `enableTools`。
-- **在「工作区 #1」打开，只影响 #1；在「工作区 #2」聊天时，#2 的开关仍是关的**，模型不会调用工具。
-- 每个要用工具调用的窗口，都要在自己的设置面板里单独打开开关。
-- 窗口标题栏写着「工作区 #1 / #2 / …」，可据此确认当前在哪个窗口。
+- 存在会话对象上的 `enableTools` 字段（随 `wN::sc.chat.v1` 一起持久化）。
+- **「工具鱼」开着、「非工具鱼」关着，互不影响**；同一个窗口里的不同对话各自独立。
+- 设置面板里拨动开关，只作用于**当前激活的那个对话**，面板文案会写出是哪个会话。
+- 新建会话时继承当前窗口 `settings.enableTools` 的值当默认，之后各自独立。
 
-> 这是当前的设计选择：工作区之间彻底隔离、互不串数据。若你只在默认窗口使用，打开一次即可；多窗口并存时按上条逐个开启。
+> 演进过程：最初是窗口级（同窗口所有会话共用），用户反馈「关掉一个另一个也关了」，
+> 现已改为会话级。窗口级 `settings.enableTools` 只作为「新会话的默认值」和
+> 「老会话没有该字段时的回落值」。
+
+**忘了开也不至于摸不着头脑**：开关关闭时，若你在聊天里要激活码（同时出现「激活码/注册码/续费码」这类词 + 一个像设备号的串），
+后端会在**请求模型之前直接拦下**，回一句明确的操作指引，而不是让模型搪塞「我没有这个能力」。
+判断逻辑刻意保守，闲聊一律放行，不会误伤。
 
 ### 排错
 
 | 现象 | 原因 / 解法 |
 | --- | --- |
-| 开了开关但模型仍自己编答案 | ① 当前窗口的开关没开（去本窗口设置里确认）；② 模型不支持 tools——`ollama show qwen2.5:7b` 看 `capabilities` 是否含 `tools`；③ **旧会话历史污染**（见下条） |
+| 开了开关但模型仍自己编答案 | ① **当前会话**的开关没开（去设置里确认，注意是按会话保存的）；② 模型不支持 tools——`ollama show qwen2.5:7b` 看 `capabilities` 是否含 `tools`；③ **旧会话历史污染**（见下条） |
 | **新会话正常、旧会话一直编假码** | 旧会话历史里已积累了多个假激活码，模型会模仿这个模式而**不再调用工具**（实测：历史中 ≥4 对「问激活码→假码」问答就会触发）。已在 `server/tool-loop.js` 修复：① 用户消息尾自动追加强制指令；② 模型仍拒绝时由服务端**确定性兜底**，直接 spawn exe 并用真实结果覆盖。若仍想彻底清掉，可新建一个会话 |
-| 换了窗口就不生效 | 正常现象，开关按工作区隔离，在新窗口重新打开 |
+| 换了会话/窗口就不生效 | 正常现象：开关按**会话**保存，切到另一个对话要单独打开；不同窗口之间也各自独立 |
+| 聊天里被直接回了一句「工具调用开关还没打开」 | 这是主动拦截：开关关着时后端不会去问模型，而是直接告诉你开关在哪。到「设置 → 基础设置 → 高级生成参数」打开「工具调用 Tools」后重发即可 |
 | 后端日志出现 `tool_calls` 但结果是假的 | 检查 `/api/local-python/search` 是否正常（curl 打一次看真实 stdout），工具结果没回灌成功时模型会自己圆 |
 | 模型回复了正确激活码，界面却是空白 | 已修复：`tool-loop` 原先无视前端 `stream` 标志一律返回 JSON，而前端流式分支（尤其 OpenAI 协议）只认 `data:` 开头的 SSE 行，整段回复被丢弃。现按 `stream` 分别返回 SSE / JSON |
-| 设置里开了开关，实际却没带 tools | 已修复：`session.config` 是切换模型时用 `{ ...settings }` 拍的快照，会把当时的 `enableTools` 一起冻住，反过来静默压掉开关。现工具开关只读**当前工作区的 `settings`**、不读会话快照（注意：这里的「当前工作区 settings」仍是按窗口隔离的，不是跨工作区全局 —— 见上方「开关是按工作区隔离的」） |
+| 设置里开了开关，实际却没带 tools | 已修复两次：① 原先 `session.config` 是切换模型时用 `{ ...settings }` 拍的快照，会把当时的 `enableTools` 冻住，静默压掉开关；② 后又发现读窗口级 `settings` 会让**同窗口所有会话共用**，关一个等于关全部。现在开关是**会话级**（`session.enableTools`），由 `store/chat.js` 在请求时传入 `sessionEnableTools`，不再依赖任何快照 |
+| **插件已禁用，却还能生成激活码** | 已修复：原先「插件开关」只在 UI 层生效，`/api/local-python/search` 与工具编排都不校验状态，所以禁用后仍可调用。现在 `plugins_config.json` 的 `enabled` 是**唯一权威判据**：① `tool-loop` 在禁用时**不注入 tools 定义**并直接短路返回（连模型都不请求）；② `/search` 返回 `403 PLUGIN_DISABLED`；③ `/health` 报「未启用」而非「已就绪」，面板按钮同步锁定。配置每次实时读盘，拨动开关**立即生效，无需重启** |
+| 在一个窗口改设置，另一个窗口的数据被串写 | 已加固：前端 `workspaceId` 是模块加载时的常量，URL 与 preload 两处都读不到时会静默回退成 `w1`，导致第二个窗口把数据写到第一个窗口头上。现在 ① 主进程 `kv:get` / `kv:set` 会按**发出请求窗口的真实工作区**校正 `wN::` 前缀（`canonicalizeKey`）；② 前端启动时若发现 id 缺失，会向主进程索取权威 id 并写回 URL 后重载（`ensureWorkspaceId`）。若主进程日志出现 `[IPC] 已校正工作区前缀`，说明此前确实发生过前缀错写 |
 
-相关实现：`server/tool-loop.js`（编排层）、`server/index.js` 的 `/api/plugin-chat` 中的 `enableTools` 分支、`src/api/llm.js` 的 `proxyPayload`。
+相关实现：`server/tool-loop.js`（编排层）、`server/index.js` 的 `/api/plugin-chat` 中的 `enableTools` 分支、`src/store/chat.js` 的 `setSessionEnableTools`、`src/api/llm.js` 的 `proxyPayload`、`electron/main.js` 的 `canonicalizeKey`。
 
 ---
 
@@ -501,9 +530,9 @@ Write-Host '安装版用户还需复制到：%APPDATA%\SelfChat\plugins\adshield
 
 | 内容 | 位置 |
 | --- | --- |
-| 聊天记录 / 设置 / API Key | `%APPDATA%\SelfChat\data.sqlite`（`kv_store` 表） |
-| 插件文件 | `%APPDATA%\SelfChat\plugins\`（运行时）、`server\plugins\`（开发期 / 内置） |
-| 插件启停与别名 | `%APPDATA%\SelfChat\plugins_config.json` |
+| 聊天记录 / 设置 / API Key | `%APPDATA%\s-c\data.sqlite`（`kv_store` 表） |
+| 插件文件 | `%APPDATA%\s-c\plugins\`（运行时）、`server\plugins\`（开发期 / 内置） |
+| 插件启停与别名 | `%APPDATA%\s-c\plugins_config.json` |
 | 工作区注册表 | SQLite 里的 `sc.workspaces.v1` 键 |
 | 桌面安装包 | `release/` |
 

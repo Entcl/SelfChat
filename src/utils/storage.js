@@ -38,13 +38,51 @@ function readWorkspaceId() {
   return typeof raw === 'string' && WORKSPACE_RE.test(raw) ? raw : ''
 }
 
-/** 当前窗口的工作区 id（'w1' / 'w2' / ...） */
+/**
+ * 当前窗口的工作区 id（'w1' / 'w2' / ...）
+ *
+ * ⚠️ 这里的 `|| DEFAULT_WORKSPACE` 只是浏览器预览环境的兜底。
+ * 在 Electron 里，如果两处来源都读不到，说明注入链路出了问题 ——
+ * 此时若静默退化成 w1，第二个窗口就会把数据写到第一个窗口头上
+ * （曾出现过「在别的窗口关掉开关，工具鱼窗口的开关也跟着变了」）。
+ *
+ * 因此下面在 Electron 环境下会主动向主进程要一次权威 id 做自愈，
+ * 主进程的 kv:get / kv:set 也会再校正一次前缀，双保险。
+ */
 export const workspaceId = readWorkspaceId() || DEFAULT_WORKSPACE
 
 /** 是否运行在 Electron 里（有工作区概念） */
 export const hasWorkspace = Boolean(readWorkspaceId())
 
 const isElectron = typeof window !== 'undefined' && window.electronAPI
+
+/**
+ * 启动时校正工作区 id。
+ *
+ * 正常情况下 workspaceId 已经对了，这里等价于无操作。
+ * 当 URL 参数缺失导致退化成 w1 时，向主进程索取本窗口真实 id 并写回 URL，
+ * 避免后续所有读写都打错命名空间。
+ */
+export async function ensureWorkspaceId() {
+  if (!isElectron || !window.electronAPI?.workspaces?.current) return workspaceId
+  // 已经拿到可信来源（URL 或 preload），无需校正
+  if (readWorkspaceId()) return workspaceId
+  try {
+    const authoritative = await window.electronAPI.workspaces.current()
+    if (typeof authoritative === 'string' && WORKSPACE_RE.test(authoritative)) {
+      console.warn(
+        `[Storage] 工作区 id 缺失，已从主进程校正为 ${authoritative}（原回退值 ${DEFAULT_WORKSPACE}）`,
+      )
+      const url = new URL(window.location.href)
+      url.searchParams.set('sc-workspace', authoritative)
+      window.history.replaceState(null, '', url.toString())
+      window.location.reload()
+    }
+  } catch (err) {
+    console.warn('[Storage] 工作区 id 校正失败:', err?.message)
+  }
+  return workspaceId
+}
 
 /** 给逻辑 key 加上工作区命名空间 */
 export function nsKey(key) {

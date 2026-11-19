@@ -21,8 +21,38 @@
  */
 
 const axios = require('axios')
+// 插件启用状态的唯一权威判据（与设置面板共用同一份 plugins_config.json）
+const { checkAdshieldEnabled } = require('./routes/local-python')
 
 const MAX_ROUNDS = 5
+
+/**
+ * 插件被禁用时直接返回给用户的固定话术。
+ *
+ * 为什么不由模型自由发挥：这里表达的是「一个明确的产品状态」——
+ * 用户自己关掉了开关，就应当得到「未启用 / 没有权限」这样的确定性回答，
+ * 而不是让模型去猜、去解释、甚至又编一个激活码。
+ */
+const DISABLED_REPLY =
+  '无法生成激活码：AdShield 插件当前未启用。\n\n' +
+  '请到「设置 → 插件管理 → EXE 插件」打开 adshield_exe 的开关后重试。'
+
+/**
+ * 「工具调用开关没打开」时返回给用户的固定话术。
+ *
+ * 为什么要在后端拦截、而不是让模型自由回答：
+ *   开关关着的时候，模型完全不知道 AdShield 的存在，只会给出
+ *   「我不具备计算激活码的能力」这类搪塞，用户根本得不到可执行的下一步。
+ *   与其让用户以为功能坏了，不如直接告诉他开关在哪。
+ *
+ * 注意与 DISABLED_REPLY 的区别：
+ *   - DISABLED_REPLY  = 功能开关开着，但「插件」被禁用（去 EXE 插件里打开）
+ *   - TOOLS_OFF_REPLY = 「工具调用」总开关没开（去高级生成参数里打开）
+ */
+const TOOLS_OFF_REPLY =
+  '看起来你想让我计算激活码，但「工具调用」开关还没打开，所以我无法调用本地插件来完成。\n\n' +
+  '请到「设置 → 基础设置 → 高级生成参数」中打开「工具调用 Tools」，然后重新发送即可。\n' +
+  '（该开关按会话独立保存，只影响当前这个对话。）'
 
 /**
  * 工具定义（OpenAI / Ollama 通用格式）。
@@ -141,6 +171,46 @@ function extractAssistantMessage(data, isOpenAI) {
   return data?.message || null
 }
 
+// ============================================================
+// 「工具调用未开启」时的前置拦截
+// ============================================================
+/**
+ * 判断用户这句话是不是在「要一个激活码」。
+ *
+ * 只在开关关闭时才用，用来决定要不要拦下来给一句明确提示。
+ * 判据刻意保守 —— 宁可漏判（退回普通对话），也不要误伤闲聊：
+ *   必须同时出现「激活码/注册码/续费码」这类词 + 一个像设备号的串。
+ *
+ * @param {Array<{role:string, content:any}>} messages
+ * @returns {string|null} 命中则返回设备 ID，否则 null
+ */
+function detectActivationRequest(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg?.role !== 'user' || typeof msg.content !== 'string') continue
+    const text = msg.content
+
+    // 关键词闸门：没有这些词就不拦，避免「你好」被塞一句开关提示
+    if (!/(激活码|注册码|续费码|授权码|激活)/i.test(text)) continue
+
+    return extractDeviceId([msg])
+  }
+  return null
+}
+
+/**
+ * 给前端/调用方判断：开关关闭时是否该拦。
+ * 命中返回要直接回给用户的文本，否则 null。
+ *
+ * @param {Array<{role:string, content:any}>} messages
+ * @returns {string|null}
+ */
+function guardToolsOff(messages) {
+  const deviceId = detectActivationRequest(messages)
+  if (!deviceId) return null
+  console.log('[tool-loop] 工具调用开关未开启，拦截激活码请求 deviceId=%j', deviceId)
+  return TOOLS_OFF_REPLY
+}
 /** 判断 assistant 消息里有没有 tool_calls */
 function extractToolCalls(message) {
   const calls = message?.tool_calls
@@ -213,6 +283,81 @@ async function callModelOnce({ finalTargetUrl, targetHeaders, proxyUrl, proxyAge
 }
 
 /**
+ * 把最终文本按「前端当初怎么问的」回写出去。
+ *
+ * 前端 src/api/llm.js 有两条完全不同的解析分支，取决于 useStream：
+ *   - stream=true  → 走 SSE 行解析。OpenAI 协议只认带 `data:` 前缀的行，
+ *                    不带前缀会被 handleLine 直接丢弃 —— 整段回复变成空气。
+ *   - stream=false → 直接 response.json()。
+ *
+ * 早期版本无视 useStream 一律返回 JSON，于是出现「模型明明生成了正确激活码，
+ * 界面却是空白消息」。所以这里统一由 stream 标志决定格式，两种都要正确。
+ *
+ * @param {object} opts
+ * @param {import('express').Response} opts.res
+ * @param {boolean} opts.isOpenAI
+ * @param {object}  opts.restPayload
+ * @param {string}  opts.text
+ * @param {{tokens:number}|null} opts.usage
+ */
+function sendResult({ res, isOpenAI, restPayload, text, usage }) {
+  const finalText = typeof text === 'string' ? text : ''
+  const tokens = usage?.tokens ?? 1
+  const wantsStream = restPayload?.stream !== false
+
+  if (!wantsStream) {
+    res.setHeader('Content-Type', 'application/json')
+    if (isOpenAI) {
+      return res.json({
+        choices: [{ message: { role: 'assistant', content: finalText }, finish_reason: 'stop' }],
+        usage: { completion_tokens: tokens },
+      })
+    }
+    return res.json({
+      message: { role: 'assistant', content: finalText },
+      done: true,
+      eval_count: tokens,
+      eval_duration: 100000000,
+    })
+  }
+
+  // ---- 流式分支：把已经算好的最终文本包装成 SSE 帧 ----
+  // 注意：工具编排本身仍是非流式（要拿完整 JSON 才能解析 tool_calls），
+  // 这里只是把最终结果按 SSE 协议吐出去，让前端那条解析路径能正常收下。
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+
+  if (isOpenAI) {
+    if (finalText) {
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: finalText } }] })}\n\n`)
+    }
+    res.write(
+      `data: ${JSON.stringify({
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        usage: { completion_tokens: tokens },
+      })}\n\n`
+    )
+    res.write('data: [DONE]\n\n')
+  } else {
+    if (finalText) {
+      res.write(
+        `${JSON.stringify({ message: { role: 'assistant', content: finalText }, done: false })}\n`
+      )
+    }
+    res.write(
+      `${JSON.stringify({
+        message: { role: 'assistant', content: '' },
+        done: true,
+        eval_count: tokens,
+        eval_duration: 100000000,
+      })}\n`
+    )
+  }
+  return res.end()
+}
+
+/**
  * 主入口：处理一次带工具能力的对话。
  *
  * @param {object} opts
@@ -247,6 +392,29 @@ async function runToolLoop({
   let executedAny = false
   // 模型中「拒绝调用工具却直接编答案」时触发兜底，只兜一次
   let fallbackTried = false
+
+  // ============================================================
+  // 前置闸门：插件没启用就根本不要把工具交给模型。
+  //
+  // 为什么在这里拦、而不是只靠 /search 报错：
+  //   1) 没有 tools 定义，模型连「有这个能力」都不知道，不可能去尝试；
+  //   2) 用户看到的是一句确定的产品提示，而不是插件层的 HTTP 403 转述；
+  //   3) 省掉整整两轮模型请求 —— 禁用状态下这本来就没必要花时间。
+  //
+  // 配置是每次实时读盘的（见 local-python.js 的 readPluginConfig），
+  // 所以用户在设置里拨动开关后立刻生效，不需要重启应用。
+  // ============================================================
+  const gate = checkAdshieldEnabled()
+  if (!gate.enabled) {
+    console.warn(`[tool-loop] 插件 ${gate.id} 未启用，直接拒绝并短路返回`)
+    return sendResult({
+      res,
+      isOpenAI,
+      restPayload,
+      text: DISABLED_REPLY,
+      usage: null,
+    })
+  }
 
   console.log(`[tool-loop] ① 收到请求，注入 tools 定义，model=%j`, basePayload.model)
 
@@ -362,69 +530,14 @@ async function runToolLoop({
     console.log('[tool-loop] 本轮对话未触发任何工具调用（模型判断不需要）')
   }
 
-  // ============================================================
-  // 回写前端：必须按「前端当初怎么问的」来回答。
-  //
-  // 前端 src/api/llm.js 有两条完全不同的解析分支，取决于 useStream：
-  //   - stream=true  → 走 SSE 行解析。OpenAI 协议只认带 `data:` 前缀的行，
-  //                    不带前缀会被 handleLine 直接丢弃 —— 整段回复变成空气。
-  //   - stream=false → 直接 response.json()。
-  //
-  // 早期版本这里无视 useStream 一律返回 JSON，于是「模型明明生成了正确激活码，
-  // 界面却是空白消息」。修法：跟着请求的 stream 标志走，两种格式各自正确。
-  // ============================================================
-  const wantsStream = restPayload?.stream !== false
-
-  if (!wantsStream) {
-    res.setHeader('Content-Type', 'application/json')
-    if (isOpenAI) {
-      return res.json({
-        choices: [{ message: { role: 'assistant', content: finalText }, finish_reason: 'stop' }],
-        usage: { completion_tokens: lastUsage?.tokens ?? 1 },
-      })
-    }
-    return res.json({
-      message: { role: 'assistant', content: finalText },
-      done: true,
-      eval_count: lastUsage?.tokens ?? 1,
-      eval_duration: 100000000,
-    })
-  }
-
-  // ---- 流式分支：把已经算好的最终文本包装成 SSE 帧 ----
-  // 注意：工具编排本身仍是非流式（要拿完整 JSON 才能解析 tool_calls），
-  // 这里只是把最终结果按 SSE 协议吐出去，让前端那条解析路径能正常收下。
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
-  res.setHeader('Cache-Control', 'no-cache')
-  res.setHeader('Connection', 'keep-alive')
-
-  if (isOpenAI) {
-    if (finalText) {
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: finalText } }] })}\n\n`)
-    }
-    res.write(
-      `data: ${JSON.stringify({
-        choices: [{ delta: {}, finish_reason: 'stop' }],
-        usage: { completion_tokens: lastUsage?.tokens ?? 1 },
-      })}\n\n`
-    )
-    res.write('data: [DONE]\n\n')
-  } else {
-    if (finalText) {
-      res.write(
-        `${JSON.stringify({ message: { role: 'assistant', content: finalText }, done: false })}\n`
-      )
-    }
-    res.write(
-      `${JSON.stringify({
-        message: { role: 'assistant', content: '' },
-        done: true,
-        eval_count: lastUsage?.tokens ?? 1,
-        eval_duration: 100000000,
-      })}\n`
-    )
-  }
-  return res.end()
+  // 统一走 sendResult：由它按前端请求的 stream 标志选择 SSE 或 JSON
+  return sendResult({
+    res,
+    isOpenAI,
+    restPayload,
+    text: finalText,
+    usage: lastUsage,
+  })
 }
 
-module.exports = { runToolLoop, ADSHIELD_TOOL }
+module.exports = { runToolLoop, ADSHIELD_TOOL, guardToolsOff }

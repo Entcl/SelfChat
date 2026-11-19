@@ -112,18 +112,46 @@ function bootstrap() {
 
   // ================= IPC：KV 存储 =================
   // 渲染进程通过 preload 暴露的 electronAPI 调用，避免开启 nodeIntegration
-  ipcMain.handle('kv:get', (_event, key) => {
+  //
+  // ⚠️ 关键：key 里的工作区前缀**不可信**。
+  //
+  // 前端 storage.js 的 workspaceId 是模块加载时算出的常量，读不到 URL 参数时会
+  // 静默回退成 'w1'。那种情况下，第二个窗口的所有读写都会落到 w1 上 ——
+  // 表现为「在别的窗口关掉开关，工具鱼窗口的开关也跟着变了」。
+  //
+  // 所以这里做一次权威校正：以「发出请求的那个窗口」的真实工作区为准，
+  // 把前端 key 里可能写错的前缀改回来。前端正确时这段等价于无操作。
+  const WORKSPACE_PREFIX_RE = /^w\d+::/
+
+  /**
+   * 把 `wN::` 前缀校正成当前窗口真实的工作区 id。
+   * 不带前缀的裸 key（迁移用途的旧键）原样放行，不改写。
+   */
+  function canonicalizeKey(event, rawKey) {
+    const key = String(rawKey ?? '')
+    if (!WORKSPACE_PREFIX_RE.test(key)) return key
+    const actual = workspaceOf(event)
+    if (!actual) return key
+    return key.replace(WORKSPACE_PREFIX_RE, `${actual}::`)
+  }
+
+  ipcMain.handle('kv:get', (event, key) => {
     try {
-      return getKV(key)
+      return getKV(canonicalizeKey(event, key))
     } catch (err) {
       console.error('[IPC] kv:get 失败:', err.message)
       return null
     }
   })
 
-  ipcMain.handle('kv:set', (_event, key, value) => {
+  ipcMain.handle('kv:set', (event, key, value) => {
     try {
-      return setKV(key, value)
+      const target = canonicalizeKey(event, key)
+      // 跨工作区误写保护：若前端写的前缀与真实工作区不一致，记一条日志便于排查
+      if (target !== String(key ?? '')) {
+        console.warn(`[IPC] 已校正工作区前缀: ${key} → ${target}`)
+      }
+      return setKV(target, value)
     } catch (err) {
       console.error('[IPC] kv:set 失败:', err.message)
       return false

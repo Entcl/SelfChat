@@ -58,7 +58,7 @@ const { createLocalPythonRouter } = require('./routes/local-python')
 // EXE 插件扫描：与 JS 插件分流，避免两类产物混在同一个列表里
 const { isExePluginEntry, isStandaloneExeFile, scanExePlugins } = require('./routes/exe-plugins')
 // Function Calling 编排层：把模型的 tool_calls 翻译成真实工具调用 + 结果回灌
-const { runToolLoop } = require('./tool-loop')
+const { runToolLoop, guardToolsOff } = require('./tool-loop')
 
 const app = express()
 app.use(cors())
@@ -591,6 +591,39 @@ app.post('/api/plugin-chat', async (req, res) => {
       }
       return
     }
+  }
+
+  // ============================================================
+  // 「工具调用」开关关闭时的前置拦截。
+  //
+  // 开关关着，模型压根不知道有 AdShield 这个能力，遇到「算激活码」
+  // 只会回一句「我没有这个能力」—— 用户既拿不到结果，也不知道该去哪开。
+  // 所以在请求模型之前就拦下来，直接给出可执行的下一步。
+  //
+  // 只在明确要激活码时才拦；闲聊一律放行走原逻辑。
+  // ============================================================
+  const toolsOffHint = guardToolsOff(messages)
+  if (toolsOffHint) {
+    const isOpenAI = !!(targetUrl && targetUrl.includes('/v1/chat/completions'))
+    if (restPayload.stream === false) {
+      if (isOpenAI) {
+        res.json({ choices: [{ message: { role: 'assistant', content: toolsOffHint } }], usage: { completion_tokens: 1 } })
+      } else {
+        res.json({ message: { role: 'assistant', content: toolsOffHint }, done: true, eval_count: 1, eval_duration: 100000000 })
+      }
+      return
+    }
+    res.setHeader('Content-Type', 'text/event-stream')
+    if (isOpenAI) {
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: toolsOffHint } }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      res.write('data: [DONE]\n\n')
+    } else {
+      res.write(`${JSON.stringify({ message: { role: 'assistant', content: toolsOffHint }, done: false })}\n`)
+      res.write(`${JSON.stringify({ message: { role: 'assistant', content: '' }, done: true, eval_count: 1, eval_duration: 100000000 })}\n`)
+    }
+    res.end()
+    return
   }
 
   try {

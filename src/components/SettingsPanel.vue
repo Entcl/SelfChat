@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import MarkdownBody from './MarkdownBody.vue'
-import { chat, checkStatus, clearAll, activeSession, updateSessionConfig } from '../store/chat'
+import { chat, checkStatus, clearAll, activeSession, updateSessionConfig, setSessionEnableTools } from '../store/chat'
 import { askConfirm } from '../store/confirm'
 import { chatUrlPreview, resetSettings, settings, API_PRESETS } from '../store/settings'
 import { resolvedTheme, setTheme, theme } from '../store/theme'
@@ -589,6 +589,30 @@ async function autoFetchModels(snapshot) {
 
 function applyPrompt(preset) { settings.systemPrompt = preset.value }
 
+// ================= 工具调用开关（会话级） =================
+/**
+ * 当前会话是否开启了工具调用。
+ *
+ * 为什么读会话而不是读 settings：
+ *   工具开关已改为「每个对话各自独立」，同窗口里 A 会话开着不影响 B 会话。
+ *   会话没有该字段时（老数据）回落到窗口级设置，避免升级后突然用不了。
+ */
+const sessionToolsEnabled = computed(() => {
+  const sess = activeSession.value
+  if (!sess) return false
+  return typeof sess.enableTools === 'boolean' ? sess.enableTools : settings.enableTools === true
+})
+
+function toggleSessionTools(next) {
+  const sess = activeSession.value
+  if (!sess) return
+  setSessionEnableTools(sess.id, next)
+  // 同时把窗口级默认值同步过去：这样「新建会话」时会继承最近一次的选择，
+  // 而不是每次都回到初始的关闭状态。
+  settings.enableTools = next === true
+  toast.success(next ? `「${sess.title}」已开启工具调用` : `「${sess.title}」已关闭工具调用`)
+}
+
 function onReset() {
   resetSettings()
   setTheme('dark')
@@ -779,10 +803,18 @@ onBeforeUnmount(clearAutoFetchTimer)
                       <div class="adv-row">
                         <div>
                           <p class="adv-title">工具调用 Tools <span class="value-pill">实验</span></p>
-                          <p class="adv-sub">开启后模型可自主调用已启用的 EXE 插件（如 AdShield）。需模型支持 tools，如 qwen2.5 / qwen3</p>
+                          <p class="adv-sub">
+                            开启后模型可自主调用已启用的 EXE 插件（如 AdShield）。需模型支持 tools，如 qwen2.5 / qwen3。
+                            <strong>按会话独立保存：只作用于「{{ activeSession?.title || '未选择会话' }}」这一个对话。</strong>
+                          </p>
                         </div>
-                        <label class="toggle-switch">
-                          <input type="checkbox" :checked="settings.enableTools === true" @change="settings.enableTools = $event.target.checked" />
+                        <label class="toggle-switch" :class="{ 'is-disabled': !activeSession }">
+                          <input
+                            type="checkbox"
+                            :checked="sessionToolsEnabled"
+                            :disabled="!activeSession"
+                            @change="toggleSessionTools($event.target.checked)"
+                          />
                           <span class="slider"></span>
                         </label>
                       </div>
@@ -1125,9 +1157,19 @@ onBeforeUnmount(clearAutoFetchTimer)
 .collapse-body.open { grid-template-rows: 1fr; }
 .collapse-inner { overflow: hidden; min-height: 0; }
 .collapse-pad { display: flex; flex-direction: column; gap: 11px; padding: 11px 11px 12px; }
-.adv-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* ===== 高级参数的行（标题 + 说明 + 右侧开关） =====
+   这里必须是 flex-start 而不是 center：
+   各行说明文字长短不一（「流式输出」1 行、「工具调用」2 行），
+   若按整行垂直居中，开关会被行高「推」下去，和上一行的开关错开。
+   改为顶部对齐后，开关永远贴着标题行走，行数再多也不会跑位。
+   ================================================ */
+.adv-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+/* 文字块吃掉剩余宽度，开关固定宽度靠右，说明文字再长也不会挤走开关 */
+.adv-row > div { flex: 1; min-width: 0; }
 .adv-title { font-size: 12.5px; font-weight: 620; color: var(--text); }
 .adv-sub { font-size: 11px; color: var(--faint); margin-top: 2px; line-height: 1.45; }
+/* 开关不做收缩，并上移半个差值，让它的视觉中心对准标题那一行 */
+.adv-row .toggle-switch { flex: none; margin-top: -2px; }
 .data-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .version { text-align: center; font-size: 10.5px; color: var(--faint); padding: 4px 0 10px; }
 .panel-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 18px calc(14px + env(safe-area-inset-bottom)); flex: none; border-top: 1px solid var(--glass-border); }

@@ -216,7 +216,7 @@ Write-Host "exit=$LASTEXITCODE"     # 期望 2（缺参数）
 「插件根目录」按优先级：
 
 1. `$env:SELFCHAT_ADSHIELD_DIR`（环境变量，调试用）
-2. `<userData>\plugins`（Electron 打包后的运行时目录，通常是 `%APPDATA%\SelfChat\plugins`）
+2. `<userData>\plugins`（Electron 打包后的运行时目录，通常是 `%APPDATA%\s-c\plugins`）
 3. `<项目>\server\plugins`（开发期）
 
 ### 目录版改名 + 安装（推荐）
@@ -261,7 +261,7 @@ Copy-Item dist-exe\AdShield.exe server\plugins\ -Force
 把整个 `adshield_exe\` 目录放到：
 
 ```
-%APPDATA%\SelfChat\plugins\adshield_exe\
+%APPDATA%\s-c\plugins\adshield_exe\
 ```
 
 （`app.getPath('userData')` 默认就是这里，具体看 `server/index.js` 打印的「数据目录」）
@@ -369,7 +369,7 @@ Write-Host "产物: $exe"
 Write-Host "已安装到: $pluginDir\AdShield.exe"
 Write-Host ''
 Write-Host '提示：若用的是已安装版 SelfChat，还需把整个 adshield_exe 目录复制到：'
-Write-Host '      %APPDATA%\SelfChat\plugins\adshield_exe\'
+Write-Host '      %APPDATA%\s-c\plugins\adshield_exe\'
 ```
 
 执行：

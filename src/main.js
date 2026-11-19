@@ -5,9 +5,14 @@ import { initChatStore } from './store/chat'
 import { initUserStore } from './store/user'
 import { initTheme } from './store/theme'
 import { initSettings } from './store/settings'
-import { adoptLegacyKeys, migrateLocalStorage } from './utils/storage' // 👈 引入迁移函数
+import { adoptLegacyKeys, migrateLocalStorage, ensureWorkspaceId } from './utils/storage' // 👈 引入迁移函数
 
 async function bootstrap() {
+  // 0. 先确认当前窗口的工作区 id。
+  //    读不到时会向主进程校正并刷新页面，避免静默退化成 w1
+  //    导致「别的窗口写的数据落到本窗口头上」。
+  await ensureWorkspaceId()
+
   // 1. 优先执行旧数据迁移
   await migrateLocalStorage()
 
