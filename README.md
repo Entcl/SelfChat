@@ -84,7 +84,7 @@
 | 构建 | Vite 8、`@vitejs/plugin-vue`，`base: './'`，`/api` 代理到 3000 |
 | PWA | `public/manifest.webmanifest` + `sw.js` + 各尺寸图标（仅生产构建且非 Electron 时注册） |
 | 桌面壳 | Electron 45（`main.js` 主进程 + `preload.js` 的 `contextBridge` 白名单） |
-| 桌面打包 | electron-builder 26 → NSIS 安装包 + Portable 单文件；`asarUnpack` 解出 `better-sqlite3` 等原生模块 |
+| 桌面打包 | electron-builder 26 → **单一 zip 绿色压缩包**（无安装程序）；`asarUnpack` 解出 `better-sqlite3` 等原生模块 |
 | 后端 | Node.js CommonJS + Express 4 + cors + multer + axios + `https-proxy-agent` |
 | 数据库 | `better-sqlite3`（原生模块，预编译 `getKV` / `setKV`） |
 | 大模型协议 | Ollama 原生协议 + OpenAI 兼容协议，SSE 流式输出 |
@@ -163,21 +163,43 @@ npm install
 | `node server/index.js` | 单独启动后端（`:3000`）并托管 `dist/` |
 | `npm run build` | 构建前端到 `dist/`（纯静态预览产物） |
 | `npm run electron:dev` | 并行启动 Vite 与 Electron（桌面调试） |
-| `npm run electron:build` | `vite build` + `electron-builder`，产出桌面安装包 |
+| `npm run electron:build` | `vite build` + `electron-builder --win zip` + 收尾脚本，产出桌面压缩包 |
 
 > 纯静态预览（GitHub Pages）**没有后端**：数据退回浏览器 localStorage，插件、SQLite 与本地模型代理不可用。推送到 `main` 后由 `.github/workflows/deploy-pages.yml` 自动构建并部署。
 
-### 4. 打包成桌面 EXE
+### 4. 打包成桌面压缩包（zip，免安装）
+
 ```powershell
 npm run electron:build
 ```
-产物在 `release/`：
-- `SelfChat Setup <version>.exe` —— NSIS 安装包（可选安装目录、不需要管理员、卸载保留数据）
-- `SelfChat_Portable_<version>.exe` —— 便携单文件
-- `win-unpacked/SelfChat.exe` —— 免安装目录
 
-打包配置集中在 `package.json` 的 `build` 字段（`appId`、`asarUnpack`、`files` 白名单、`win.target`、`nsis`、`portable`）。
-**若要把 EXE 插件一起分发，打包前先把它放进 `server/plugins/`**（见下一节），否则安装版用户需要手动复制到 `%APPDATA%\s-c\plugins\`。
+产物**只有一个文件**：
+
+```
+release/SelfChat-<version>-win-x64.zip
+```
+
+这是一个**绿色免安装压缩包**——不含任何安装程序（没有 `Setup.exe`，也没有 `Portable.exe`），
+解压到固定目录后直接双击 `SelfChat.exe` 即可运行：不写注册表、不建快捷方式、不需要管理员权限。
+
+**使用方式**
+
+1. 把 zip 解压到一个**固定目录**（例如 `D:\SOFT\SelfChat\`），要解压整个文件夹，不要只拖出 `SelfChat.exe`；
+2. 双击目录里的 `SelfChat.exe`；
+3. 压缩包根目录附带的 `使用说明.txt` 写了解压位置、数据目录、覆盖升级和卸载方法。
+
+**数据位置**：用户数据不在解压目录里，而是固定存放在 `%APPDATA%\s-c\`
+（`data.sqlite` / `plugins\` / `plugins_config.json`）。所以换目录解压新版本聊天记录照样在，
+删除解压目录也不会丢数据——这也是「解压即用、覆盖即升级」能成立的原因。
+
+**打包配置**集中在 `package.json` 的 `build` 字段：`appId`、`asarUnpack`（解出 `better-sqlite3`
+等原生模块）、`files` 白名单、`win.target`（`zip` + x64）、`win.artifactName`。
+打包末尾会执行 `build/finalize-release.cjs`：校验 `release/` 里恰好一个 zip、清理
+`win-unpacked/` 等中间产物与历史安装包残留，并检查 zip 内 `SelfChat.exe` 与
+`resources/app.asar` 是否在位。
+
+**若要把 EXE 插件一起分发，打包前先把它放进 `server/plugins/`**（见下一节），
+否则用户需要手动复制到 `%APPDATA%\s-c\plugins\`。
 
 ---
 
@@ -444,7 +466,7 @@ Write-Host '安装版用户还需复制到：%APPDATA%\s-c\plugins\adshield_exe\
 
 1. **改了业务 `.py` 必须重新打包**。exe 是把 Python 代码和解释器一起封进去的静态产物，改源码不会影响已生成的 exe。
 2. **换了 exe 不生效就删缓存目录**。应用「目标不存在才复制」，旧文件不会被覆盖。
-3. **打包后要分发给用户，就把整个 `adshield_exe\` 目录放进 `%APPDATA%\s-c\plugins\adshield_exe\``，或在 `npm run electron:build` 之前放进 `server\plugins\` 一起打进安装包。
+3. **打包后要分发给用户，就把整个 `adshield_exe\` 目录放进 `%APPDATA%\s-c\plugins\adshield_exe\``，或在 `npm run electron:build` 之前放进 `server\plugins\` 一起打进压缩包。
 
 ### 8.11 想接入第二个 / 多个脚本怎么办
 
@@ -534,7 +556,7 @@ Write-Host '安装版用户还需复制到：%APPDATA%\s-c\plugins\adshield_exe\
 | 插件文件 | `%APPDATA%\s-c\plugins\`（运行时）、`server\plugins\`（开发期 / 内置） |
 | 插件启停与别名 | `%APPDATA%\s-c\plugins_config.json` |
 | 工作区注册表 | SQLite 里的 `sc.workspaces.v1` 键 |
-| 桌面安装包 | `release/` |
+| 桌面压缩包 | `release/`（只有一个 `SelfChat-<version>-win-x64.zip`） |
 
 `.gitignore` 已排除 `node_modules/`、`dist/`、`release/`、`*.sqlite`、`plugins_config.json`、`python-service/.venv/`、`__pycache__/` 与 `server/plugins/adshield_exe/`，**本地数据与密钥不会被提交**。
 

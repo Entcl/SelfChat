@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "electron:dev": "concurrently \"npm run dev\" \"cross-env NODE_ENV=development wait-on tcp:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && electron-builder --win zip && node build/finalize-release.cjs"
   },
   "dependencies": {
     "axios": "^1.7.9",
@@ -33,6 +33,7 @@
     "directories": {
       "output": "release"
     },
+    "asar": true,
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*",
       "node_modules/bindings/**/*",
@@ -42,36 +43,33 @@
       "dist/**/*",
       "electron/**/*",
       "server/**/*",
+      "build/icon.png",
       "!server/data.sqlite",
-      "!server/plugins_config.json"
+      "!server/plugins_config.json",
+      "!server/plugins_data/**/*",
+      "!server/temp_uploads/**/*",
+      "!server/node_modules/**/*",
+      "!**/*.log",
+      "!**/.venv/**/*",
+      "!**/__pycache__/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "build/使用说明.txt",
+        "to": "使用说明.txt"
+      }
     ],
     "win": {
       "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-win-x64.${ext}",
       "target": [
         {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
+          "target": "zip",
           "arch": [
             "x64"
           ]
         }
       ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowElevation": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
-      "runAfterFinish": true
-    },
-    "portable": {
-      "artifactName": "${productName}_Portable_${version}.exe"
     }
   }
 }
