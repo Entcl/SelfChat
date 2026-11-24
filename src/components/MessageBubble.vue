@@ -8,7 +8,7 @@ import { toast } from '../store/toast'
 import { userAvatar, aiName, currentProviderType, updateName, setUserAvatar } from '../store/user'
 import defaultUserAvatar from '../assets/batman.svg'
 import AiAvatar from './AiAvatar.vue'
-import { fileToAvatarDataUrl, AvatarError } from '../utils/image'
+import { fileToAvatarDataUrl, AvatarError, AVATAR_ACCEPT_ATTR } from '../utils/image'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -62,10 +62,12 @@ async function handleFileChange(e) {
   e.target.value = ''
   if (!file) return
   try {
-    // 与 AI 头像共用同一套压缩管线，避免把几 MB 原图写进 profile blob
-    const { dataUrl } = await fileToAvatarDataUrl(file)
+    // 与 AI 头像共用同一套管线：静态图压缩，GIF 自动原样保留动画，
+    // 避免把几 MB 原图写进 profile blob
+    const { dataUrl, warn } = await fileToAvatarDataUrl(file)
     setUserAvatar(dataUrl)
-    toast.success('头像已更新')
+    if (warn) toast.info(warn)
+    else toast.success('头像已更新')
   } catch (err) {
     toast.error(err instanceof AvatarError ? err.message : '头像处理失败，请换一张试试')
   }
@@ -136,7 +138,7 @@ const statsText = computed(() => {
 
 <template>
   <article class="msg" :class="[isUser ? 'is-user' : 'is-ai', { 'is-error': message.error }]">
-    <input type="file" ref="userInput" accept="image/png, image/jpeg" style="display: none" @change="handleFileChange" />
+    <input type="file" ref="userInput" :accept="AVATAR_ACCEPT_ATTR" style="display: none" @change="handleFileChange" />
 
     <div
       v-if="isUser"

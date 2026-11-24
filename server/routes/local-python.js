@@ -47,6 +47,49 @@ const MAX_STDOUT_BYTES = 8 * 1024 * 1024
 // keyword 长度上限
 const MAX_KEYWORD_LEN = 200
 
+// ============================================================
+// 活跃子进程登记表
+// ------------------------------------------------------------
+// 为什么要登记：AdShield.exe 运行时会在 exe 自己所在目录 / 用户数据目录里
+// 持有文件句柄。安装器（非管理员）覆盖安装前必须先把这些进程结束掉，
+// 否则「文件正在使用」会导致安装失败。
+//
+// 安装器的 nsProcess 只能按镜像名查杀，理论上够了；但如果 exe 是被
+// 应用以「后台常驻」方式拉起的，应用退出时子进程可能变成孤儿继续跑。
+// 所以这里在应用侧也记一份，退出时主动清理，双保险。
+// ============================================================
+const liveChildren = new Set()
+
+/** 登记一个正在运行的子进程，退出时统一清理 */
+function trackChild(child) {
+  if (!child) return child
+  liveChildren.add(child)
+  const done = () => liveChildren.delete(child)
+  child.once('exit', done)
+  child.once('error', done)
+  return child
+}
+
+/**
+ * 结束所有仍在运行的子进程。
+ *
+ * 供 Electron 主进程在退出前调用（见 electron/main.js 的 before-quit），
+ * 这样安装/卸载时不会有 AdShield.exe 残留占用文件。
+ *
+ * @returns {Promise<void>} 全部处理完（含超时）后 resolve
+ */
+async function killAllChildren() {
+  const pending = [...liveChildren]
+  if (pending.length === 0) return
+  console.warn(`[adshield] 应用退出，清理 ${pending.length} 个仍在运行的子进程`)
+  await Promise.all(
+    pending.map((child) =>
+      killTree(child, '应用退出').catch(() => {}),
+    ),
+  )
+  liveChildren.clear()
+}
+
 /**
  * 解析插件目录。按优先级依次尝试，用第一个真实存在的 exe：
  *
@@ -362,6 +405,9 @@ function runExe(exePath, keyword) {
         spawnError: err,
       })
     }
+
+    // 登记，供应用退出时统一清理
+    trackChild(child)
 
     // ---- 超时定时器 ----
     // 关键：超时后不能只依赖 close 事件来 resolve。
@@ -725,6 +771,7 @@ module.exports = {
   // 导出这些方便单测 / 排查
   resolveExe,
   checkAdshieldEnabled,
+  killAllChildren,
   EXE_NAME,
   EXE_TIMEOUT_MS,
 }

@@ -18,7 +18,7 @@
 import { computed, ref } from 'vue'
 import { aiAvatar, currentProviderType, updateAvatar } from '../store/user'
 import { toast } from '../store/toast'
-import { fileToAvatarDataUrl, AvatarError } from '../utils/image'
+import { fileToAvatarDataUrl, AvatarError, AVATAR_ACCEPT_ATTR } from '../utils/image'
 import trumpIcon from '../assets/trumpIcon.svg'
 
 const props = defineProps({
@@ -69,11 +69,13 @@ async function onFileChange(event) {
 
   busy.value = true
   try {
-    // 在这里就把图压到 128x128 JPEG，绝不把原图 Base64 塞进 store
-    const { dataUrl } = await fileToAvatarDataUrl(file)
+    // 静态图压到 128x128 JPEG；GIF 由工具函数自动分流为原样保留（否则动画会丢），
+    // 绝不把几 MB 的原图 Base64 直接塞进 store
+    const { dataUrl, warn } = await fileToAvatarDataUrl(file)
     // 显式带上 provider：即使处理期间用户切了会话，也写回发起时的那一侧
     updateAvatar(currentProviderType.value, dataUrl)
-    toast.success('头像已更新')
+    if (warn) toast.info(warn)
+    else toast.success('头像已更新')
   } catch (err) {
     const msg = err instanceof AvatarError ? err.message : '头像处理失败，请换一张试试'
     toast.error(msg)
@@ -121,7 +123,7 @@ function onContextMenu() {
       v-if="canPick"
       ref="fileInput"
       type="file"
-      accept="image/png, image/jpeg"
+      :accept="AVATAR_ACCEPT_ATTR"
       class="ai-avatar-input"
       @change="onFileChange"
     />

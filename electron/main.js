@@ -22,6 +22,23 @@ function bootstrap() {
   // 与后端共用同一个 better-sqlite3 实例（require 缓存）
   const { getKV, setKV } = require('../server/db')
 
+  /**
+   * 结束所有仍在运行的插件子进程（如 AdShield.exe）。
+   *
+   * 走 require 缓存拿到同一个路由模块实例，这样它登记的子进程表是共享的。
+   * 任何一步失败都不应该阻止应用退出，所以整体吞掉异常。
+   */
+  async function killPluginChildren() {
+    try {
+      const mod = require('../server/routes/local-python')
+      if (mod && typeof mod.killAllChildren === 'function') {
+        await mod.killAllChildren()
+      }
+    } catch {
+      // 模块不存在或已被清理：无需处理
+    }
+  }
+
   const APP_URL = 'http://127.0.0.1:3000'
 
   // ================= 多窗口 = 多工作区 =================
@@ -289,11 +306,45 @@ function bootstrap() {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 
-  // 强制退出，防止安装时冲突
+  // 所有窗口关闭后退出。
+  //
+  // 注意：这里**不要**再遍历 destroy()。走到 'window-all-closed' 时窗口本来
+  // 就已经全部销毁了，再 destroy 一遍是多余的；真正要做的是确保进程退出。
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
-      BrowserWindow.getAllWindows().forEach((win) => win.destroy())
       app.quit()
+      // 兜底：如果 3 秒后进程还在（退出流程被某个句柄或回调拖住），
+      // 直接硬退。这是「关不掉」问题的最后一道保险。
+      // unref 保证这个定时器自己不会阻止进程退出。
+      const force = setTimeout(() => app.exit(0), 3000)
+      force.unref?.()
+    }
+  })
+
+  // 退出前清理仍在运行的插件子进程（AdShield.exe）。
+  //
+  // 为什么需要：覆盖安装时只要有一个 exe 还占着安装目录里的文件，写入就会失败。
+  // 这里在应用侧主动收一次尾，让「应用开着也能顺利安装」更稳。
+  //
+  // ⚠️ 这里**绝对不能** preventDefault 之后再异步 quit。
+  // 之前那样写会导致：window-all-closed 已经调用过一次 app.quit()，
+  // 而 before-quit 又 preventDefault() 拦下来等 Promise，两者互相打架，
+  // 一旦 Promise 或标志位停在中间态，主进程就永远退不出去 ——
+  // 表现正是「窗口已经没了，但进程还在，任务管理器里杀不掉，
+  // 安装程序也覆盖不了」。用户看到的就是「手动关闭也失败」。
+  //
+  // 现在的策略：同步发出强杀请求（不 await），然后立刻放行退出。
+  // 子进程都是 killTree（taskkill /T /F 级别）的强杀，不需要等待结果；
+  // 即使清理没做完，进程本身也已经随主进程退出而被系统回收。
+  let quittingCleanupStarted = false
+  app.on('before-quit', () => {
+    if (quittingCleanupStarted) return
+    quittingCleanupStarted = true
+    // 不 await、不 preventDefault：发出去就行，绝不阻塞退出。
+    try {
+      killPluginChildren().catch(() => {})
+    } catch {
+      // 清理失败也绝不能影响退出
     }
   })
 }

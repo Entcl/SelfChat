@@ -10,7 +10,7 @@ import { closeSettings } from '../store/ui'
 import { toast } from '../store/toast'
 import { userAvatar, aiAvatar, aiName, currentProviderType, updateName, updateAvatar, getProfileByProvider, setUserAvatar } from '../store/user'
 import { exportAllSessions } from '../utils/export'
-import { fileToAvatarDataUrl, AvatarError } from '../utils/image'
+import { fileToAvatarDataUrl, AvatarError, AVATAR_ACCEPT_ATTR } from '../utils/image'
 import defaultUserAvatar from '../assets/batman.svg'
 import AiAvatar from './AiAvatar.vue'
 import { plugins, jsPluginList, fetchPlugins, uploadPlugin, togglePlugin, removePlugin, renamePlugin, exePlugins, exePluginList, exeLoading, fetchExePlugins, toggleExePlugin } from '../store/plugins'
@@ -335,11 +335,12 @@ async function handleFileChange(e, type) {
   e.target.value = ''
   if (!file) return
   try {
-    // 统一压缩：128x128 JPEG，避免几 MB 原图撑爆 profile blob
-    const { dataUrl } = await fileToAvatarDataUrl(file)
+    // 统一处理：静态图压成 128x128 JPEG；GIF 由工具函数自动分流为原样保留（保动画）
+    const { dataUrl, warn } = await fileToAvatarDataUrl(file)
     if (type === 'user') await setUserAvatar(dataUrl)
     else updateAvatar(currentProviderType.value, dataUrl)
-    toast.success('头像已更新')
+    if (warn) toast.info(warn)
+    else toast.success('头像已更新')
   } catch (err) {
     toast.error(err instanceof AvatarError ? err.message : '头像处理失败，请换一张试试')
   }
@@ -673,7 +674,7 @@ onBeforeUnmount(clearAutoFetchTimer)
                     <img v-else :src="defaultUserAvatar" alt="默认头像" />
                   </div>
                   <div class="avatar-actions">
-                    <input type="file" ref="userInput" accept="image/*" style="display: none" @change="handleFileChange($event, 'user')" />
+                    <input type="file" ref="userInput" :accept="AVATAR_ACCEPT_ATTR" style="display: none" @change="handleFileChange($event, 'user')" />
                     <button type="button" class="btn btn-sm" @click="triggerUpload('user')">更换用户头像</button>
                     <button v-if="userAvatar" type="button" class="link-btn" @click="resetUserAvatar">恢复默认</button>
                   </div>
@@ -683,7 +684,7 @@ onBeforeUnmount(clearAutoFetchTimer)
                        否则两层圆角容器会互相裁切 -->
                   <AiAvatar size="settings" resettable />
                   <div class="avatar-actions">
-                    <input type="file" ref="aiInput" accept="image/png, image/jpeg" style="display: none" @change="handleFileChange($event, 'ai')" />
+                    <input type="file" ref="aiInput" :accept="AVATAR_ACCEPT_ATTR" style="display: none" @change="handleFileChange($event, 'ai')" />
                     <button type="button" class="btn btn-sm" @click="triggerUpload('ai')">更换 AI 头像</button>
                     <button v-if="aiAvatar" type="button" class="link-btn" @click="resetAiAvatar">恢复默认</button>
                   </div>
